@@ -8,7 +8,7 @@ readme = "README.md"
 repository = "https://github.com/RecursiveIntell/ri-agent-graph"
 homepage = "https://github.com/RecursiveIntell/ri-agent-graph"
 documentation = "https://docs.rs/ri-agent-graph"
-keywords = ["ai", "llm", "agents", "graph", "workflow", "orchestration"]
+keywords = ["ai", "llm", "agents", "graph", "workflow"]
 categories = ["algorithms", "asynchronous"]
 include = ["src/", "tests/", "examples/", "benches/", "README.md", "LICENSE-MIT", "assets/"]
 
