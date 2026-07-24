@@ -4,6 +4,7 @@
 
 [![Crates.io — engine](https://img.shields.io/crates/v/ri-agent-graph?label=ri-agent-graph)](https://crates.io/crates/ri-agent-graph)
 [![Crates.io — mcp](https://img.shields.io/crates/v/agent-graph-mcp?label=agent-graph-mcp)](https://crates.io/crates/agent-graph-mcp)
+[![MCP Badge](https://lobehub.com/badge/mcp-full/recursiveintell-agent-graph-mcp?theme=light)](https://lobehub.com/mcp/recursiveintell-agent-graph-mcp)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE-MIT)
 
 ---
