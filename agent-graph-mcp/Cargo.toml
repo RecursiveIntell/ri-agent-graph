@@ -1,6 +1,6 @@
 [package]
 name = "agent-graph-mcp"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT"
@@ -14,7 +14,7 @@ categories = ["development-tools", "asynchronous"]
 include = ["src/", "tests/", "README.md", "LICENSE-MIT", "assets/"]
 
 [dependencies]
-ri-agent-graph = { version = "0.2.1", path = "../agent-graph" }
+ri-agent-graph = { version = "0.2.2", path = "../agent-graph" }
 llm-pipeline = "0.2"
 async-trait = "0.1"
 rmcp = { version = "1", features = ["server", "transport-io"] }

@@ -1,6 +1,6 @@
 [package]
 name = "ri-agent-graph"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "Graph-based agent orchestration for Rust — LangGraph-inspired execution engine with checkpointing, parallel fan-out/fan-in, interrupt/resume, and event streaming"
 license = "MIT"
