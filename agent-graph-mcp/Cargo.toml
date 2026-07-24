@@ -8,6 +8,10 @@ description = "MCP server exposing agent-graph + llm-pipeline for graph-orchestr
 repository = "https://github.com/RecursiveIntell/ri-agent-graph"
 homepage = "https://github.com/RecursiveIntell/ri-agent-graph"
 documentation = "https://docs.rs/agent-graph-mcp"
+readme = "README.md"
+keywords = ["mcp", "agent", "graph", "workflow", "orchestration"]
+categories = ["development-tools", "asynchronous"]
+include = ["src/", "tests/", "README.md", "LICENSE-MIT", "assets/"]
 
 [dependencies]
 ri-agent-graph = { version = "0.2.1", path = "../agent-graph" }
