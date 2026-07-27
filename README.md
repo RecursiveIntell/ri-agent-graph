@@ -1,6 +1,6 @@
 # ri-agent-graph
 
-**Graph-based agent orchestration for Rust** — a LangGraph-inspired execution engine with an MCP server, parallel fan-out/fan-in, checkpointing, interrupt/resume, and cryptographic receipts.
+**Run 9 agents at once.** Graph-based agent orchestration for Rust — a LangGraph-inspired execution engine with parallel fan-out (up to 16 nodes), fan-in joins, checkpointing, interrupt/resume, cryptographic receipts, and an MCP server exposing 25 typed tools.
 
 [![Crates.io — engine](https://img.shields.io/crates/v/ri-agent-graph?label=ri-agent-graph)](https://crates.io/crates/ri-agent-graph)
 [![Crates.io — mcp](https://img.shields.io/crates/v/agent-graph-mcp?label=agent-graph-mcp)](https://crates.io/crates/agent-graph-mcp)
@@ -51,6 +51,47 @@ npx -y @recursiveintell/agent-graph-mcp --direct --base-url http://127.0.0.1:114
 Hermes ──→ agent-graph-mcp (proxy) ──Unix socket──→ agent-graph-mcpd (daemon) ──→ SQLite
               stdin/stdout                framed             Tokio async I/O
 ```
+
+## 9 agents at once
+
+Fan out to 9 LLM nodes in parallel via `JoinSet`-backed concurrency, then join into one synthesis:
+
+```json
+{
+  "name": "9-agent-sweep",
+  "entry": "fanout",
+  "nodes": [
+    {"id": "fanout", "type": "passthrough"},
+    {"id": "agent_0", "type": "llm", "prompt": "Research topic A: {input}"},
+    {"id": "agent_1", "type": "llm", "prompt": "Research topic B: {input}"},
+    {"id": "agent_2", "type": "llm", "prompt": "Research topic C: {input}"},
+    {"id": "agent_3", "type": "llm", "prompt": "Analyze dim 1: {input}"},
+    {"id": "agent_4", "type": "llm", "prompt": "Analyze dim 2: {input}"},
+    {"id": "agent_5", "type": "llm", "prompt": "Analyze dim 3: {input}"},
+    {"id": "agent_6", "type": "llm", "prompt": "Critique angle X: {input}"},
+    {"id": "agent_7", "type": "llm", "prompt": "Critique angle Y: {input}"},
+    {"id": "agent_8", "type": "llm", "prompt": "Synthesize: {collected}"},
+    {"id": "join", "type": "join", "config": {"inputs": ["agent_0","agent_1","agent_2","agent_3","agent_4","agent_5","agent_6","agent_7","agent_8"], "output": "collected", "mode": "collect_array"}},
+    {"id": "report", "type": "llm", "prompt": "Final report from: {collected}"}
+  ],
+  "edges": [
+    {"from": "fanout", "to": "agent_0"}, {"from": "fanout", "to": "agent_1"},
+    {"from": "fanout", "to": "agent_2"}, {"from": "fanout", "to": "agent_3"},
+    {"from": "fanout", "to": "agent_4"}, {"from": "fanout", "to": "agent_5"},
+    {"from": "fanout", "to": "agent_6"}, {"from": "fanout", "to": "agent_7"},
+    {"from": "fanout", "to": "agent_8"},
+    {"from": "agent_0", "to": "join"}, {"from": "agent_1", "to": "join"},
+    {"from": "agent_2", "to": "join"}, {"from": "agent_3", "to": "join"},
+    {"from": "agent_4", "to": "join"}, {"from": "agent_5", "to": "join"},
+    {"from": "agent_6", "to": "join"}, {"from": "agent_7", "to": "join"},
+    {"from": "agent_8", "to": "join"},
+    {"from": "join", "to": "report"}, {"from": "report", "to": "END"}
+  ],
+  "max_parallelism": 9
+}
+```
+
+Scale from 1 to 16 parallel branches. Join modes: `collect_array`, `merge_objects`, `first_non_null`, `all_success`, `quorum`.
 
 ## Node types
 

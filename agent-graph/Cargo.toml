@@ -1,8 +1,8 @@
 [package]
 name = "ri-agent-graph"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
-description = "Graph-based agent orchestration for Rust — LangGraph-inspired execution engine with checkpointing, parallel fan-out/fan-in, interrupt/resume, and event streaming"
+description = "Run 9 agents at once — graph-based agent orchestration for Rust with parallel fan-out (up to 16 nodes), fan-in joins, checkpointing, interrupt/resume, and event streaming"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/RecursiveIntell/ri-agent-graph"
