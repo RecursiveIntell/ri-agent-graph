@@ -90,7 +90,7 @@ printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion
 
 | Tool | Description |
 |------|-------------|
-| `graph_execute` | Sync (blocking) or async execution |
+| `graph_execute` | Normal execution is synchronous. Sync (blocking) or async execution |
 | `graph_run_start` | Async start → returns `run_id` immediately |
 | `graph_run_wait` | Block until terminal state with timeout |
 | `graph_run_cancel` | Cooperative cancellation (best-effort) |
@@ -226,7 +226,7 @@ agent-graph-mcpd --data-dir PATH --socket PATH
 - **Checkpoint/resume** is deterministic local resume only — supports linear chains of `passthrough` and `state_transform` nodes with SQLite-bound state. LLM, router, join, parallel, loop, subgraph, and external tool nodes are excluded from resume
 - **Witness capture** stores caller-supplied content only; locators are never fetched, and source authority is never independently verified
 - **Receipts** use HMAC-SHA256 authentication. They do not prove an external model call occurred and are not complete replay
-- **Durable approval** is supported only as a SQLite-backed decision over an already-created deterministic-local checkpoint; it cannot execute arbitrary Hermes tools, shell, filesystem, or provider actions
+- Durable approval is supported only as a SQLite-backed decision over an already-created deterministic-local checkpoint; it cannot execute arbitrary Hermes tools, shell, filesystem, or provider actions
 
 ## Built-in templates
 

@@ -14,6 +14,7 @@ pub mod policy;
 pub mod promotion;
 pub mod proxy;
 pub mod run_manager;
+pub mod safety;
 pub mod server;
 pub mod spec;
 pub mod store;

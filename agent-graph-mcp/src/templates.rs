@@ -47,6 +47,22 @@ pub fn list() -> Value {
           "params": ["name"],
           "storage_class": "server_builtin",
           "executable": true
+        },
+        {
+          "id": "code_audit",
+          "version": "1",
+          "description": "Three-auditor parallel code audit: architecture, security, and quality auditors analyze in parallel, join findings, synthesize a ranked report with severity levels.",
+          "params": ["name"],
+          "storage_class": "server_builtin",
+          "executable": true
+        },
+        {
+          "id": "release_verification",
+          "version": "1",
+          "description": "Release verification pipeline: planner defines checks, executor runs them, validator judges pass/fail, conditional routing to reporter or formatter based on outcome.",
+          "params": ["name"],
+          "storage_class": "server_builtin",
+          "executable": true
         }
       ],
       "unavailable": [
@@ -248,6 +264,69 @@ pub fn instantiate(id: &str, name: &str) -> Result<Value, String> {
             Ok(spec)
         }
 
+        // ── code_audit (3-auditor parallel, adapted from Agent-Forge roles) ─
+        "code_audit" => Ok(json!({
+            "spec_version": "2",
+            "name": name,
+            "entry": "coordinator",
+            "output_key": "audit_report",
+            "max_iterations": 16,
+            "max_parallelism": 3,
+            "reducers": {"audit_dimensions": "last_write_wins"},
+            "nodes": [
+                {"id": "coordinator", "type": "llm", "prompt": "You are a code audit coordinator. Analyze this codebase or description and identify 3 audit dimensions: architecture, security, and quality. Output JSON: {\"dimensions\": [{\"id\":\"dim0\",\"query\":\"architecture audit focus\"}, {\"id\":\"dim1\",\"query\":\"security audit focus\"}, {\"id\":\"dim2\",\"query\":\"quality audit focus\"}]}\n\nTarget: {input}", "json_mode": true, "config": {"output_key": "audit_dimensions"}},
+                {"id": "fanout", "type": "passthrough", "config": {"input_key": "audit_dimensions"}},
+                {"id": "arch_auditor", "type": "llm", "prompt": "You are a Rust architecture auditor. Analyze module boundaries, ownership patterns, error propagation, trait design, and separation of concerns. Identify concrete defects with severity (critical/high/medium/low), affected surface, evidence, and fix direction.\n\nAudit focus: {input}\nThe dimensions JSON is available. Find dimension 'dim0' and address its query.", "config": {"input_key": "audit_dimensions", "output_key": "arch_result"}},
+                {"id": "security_auditor", "type": "llm", "prompt": "You are a security auditor. Check input validation, secret handling, path traversal, egress control, and unsafe code. Identify concrete defects with severity (critical/high/medium/low), affected surface, evidence, and fix direction.\n\nAudit focus: {input}\nThe dimensions JSON is available. Find dimension 'dim1' and address its query.", "config": {"input_key": "audit_dimensions", "output_key": "security_result"}},
+                {"id": "quality_auditor", "type": "llm", "prompt": "You are a code quality auditor. Evaluate test coverage, documentation, error handling, dead code, and lint cleanliness. Identify concrete defects with severity (critical/high/medium/low), affected surface, evidence, and fix direction.\n\nAudit focus: {input}\nThe dimensions JSON is available. Find dimension 'dim2' and address its query.", "config": {"input_key": "audit_dimensions", "output_key": "quality_result"}},
+                {"id": "join", "type": "join", "config": {"inputs": ["arch_result", "security_result", "quality_result"], "output": "findings", "mode": "collect_array"}},
+                {"id": "synthesize", "type": "llm", "prompt": "Synthesize these three audit findings into a unified ranked report. Order by severity (critical first). For each finding include: severity, category (architecture/security/quality), affected surface, evidence, fix direction, and acceptance test.\n\nFindings: {input}", "config": {"input_key": "findings", "output_key": "audit_report"}}
+            ],
+            "edges": [
+                {"from": "coordinator", "to": "fanout"},
+                {"from": "fanout", "to": "arch_auditor"},
+                {"from": "fanout", "to": "security_auditor"},
+                {"from": "fanout", "to": "quality_auditor"},
+                {"from": "arch_auditor", "to": "join"},
+                {"from": "security_auditor", "to": "join"},
+                {"from": "quality_auditor", "to": "join"},
+                {"from": "join", "to": "synthesize"},
+                {"from": "synthesize", "to": "END"}
+            ]
+        })),
+
+        // ── release_verification (plan→execute→validate→report/format) ──
+        "release_verification" => Ok(json!({
+            "spec_version": "2",
+            "name": name,
+            "entry": "planner",
+            "output_key": "verification_report",
+            "max_iterations": 12,
+            "nodes": [
+                {"id": "planner", "type": "llm", "prompt": "Create a release verification plan for: {input}. List all checks needed: build, tests, formatting, lints, documentation, changelog, version consistency, dependency audit. Output JSON: {\"checks\": [\"check1\", \"check2\", ...]}", "json_mode": true, "config": {"output_key": "plan"}},
+                {"id": "executor", "type": "llm", "prompt": "Execute each verification check from the plan and report pass/fail with evidence. For each check, state: check name, status (pass/fail/skip), evidence (command or file reference), and notes.\n\nPlan: {input}", "config": {"input_key": "plan", "output_key": "results"}},
+                {"id": "validator", "type": "llm", "prompt": "Review these verification results. Are all critical checks passing? Respond with JSON: {\"verified\": true/false, \"blockers\": [\"...\"], \"warnings\": [\"...\"]}\n\nResults: {input}", "json_mode": true, "config": {"input_key": "results", "output_key": "validation"}},
+                {"id": "validation_router", "type": "router", "config": {
+                    "rules": [
+                        {"path": "validation.verified", "op": "eq", "value": true, "targets": ["formatter"]},
+                        {"path": "validation.verified", "op": "eq", "value": false, "targets": ["reporter"]}
+                    ],
+                    "default": ["reporter"]
+                }},
+                {"id": "reporter", "type": "llm", "prompt": "Document the release verification failures and provide remediation steps. Include blockers and warnings.\n\nValidation: {input}\nResults: {results}", "config": {"input_key": "validation", "output_key": "verification_report"}},
+                {"id": "formatter", "type": "llm", "prompt": "Format the final release verification report confirming all checks passed. Include summary and evidence.\n\nValidation: {input}\nResults: {results}", "config": {"input_key": "validation", "output_key": "verification_report"}}
+            ],
+            "edges": [
+                {"from": "planner", "to": "executor"},
+                {"from": "executor", "to": "validator"},
+                {"from": "validator", "to": "validation_router"},
+                {"from": "validation_router", "to": "formatter", "condition": "verified"},
+                {"from": "validation_router", "to": "reporter", "condition": "failed"},
+                {"from": "reporter", "to": "END"},
+                {"from": "formatter", "to": "END"}
+            ]
+        })),
+
         _ => Err(format!("template '{id}' is unavailable")),
     }
 }
@@ -393,5 +472,58 @@ mod tests {
         );
         let spec = result.unwrap();
         assert_eq!(spec["spec_version"], "2");
+    }
+
+    // code_audit template: 3 auditors with role-specific prompts
+    #[test]
+    fn code_audit_has_three_specialized_auditors() {
+        let spec = instantiate("code_audit", "audit-test").unwrap();
+        let nodes = spec["nodes"].as_array().unwrap();
+        for auditor in ["arch_auditor", "security_auditor", "quality_auditor"] {
+            let node = nodes
+                .iter()
+                .find(|n| n["id"].as_str() == Some(auditor))
+                .expect(auditor);
+            assert!(
+                node["prompt"].as_str().unwrap().contains("auditor"),
+                "{auditor} prompt must mention auditor role"
+            );
+            assert_eq!(
+                node["config"]["input_key"].as_str().unwrap(),
+                "audit_dimensions",
+                "{auditor} must read from audit_dimensions"
+            );
+        }
+        // Must have parallel fan-out
+        assert!(
+            spec["max_parallelism"].as_u64().unwrap_or(0) >= 3,
+            "code_audit must allow at least 3 parallel auditors"
+        );
+    }
+
+    // release_verification template: plan→execute→validate with conditional routing
+    #[test]
+    fn release_verification_has_conditional_routing() {
+        let spec = instantiate("release_verification", "verify-test").unwrap();
+        let edges = spec["edges"].as_array().unwrap();
+        let has_condition = edges.iter().any(|e| e.get("condition").is_some());
+        assert!(
+            has_condition,
+            "release_verification must have conditional routing for pass/fail"
+        );
+        let nodes = spec["nodes"].as_array().unwrap();
+        for required in [
+            "planner",
+            "executor",
+            "validator",
+            "validation_router",
+            "reporter",
+            "formatter",
+        ] {
+            assert!(
+                nodes.iter().any(|n| n["id"].as_str() == Some(required)),
+                "release_verification must have node: {required}"
+            );
+        }
     }
 }
