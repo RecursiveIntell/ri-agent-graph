@@ -9,7 +9,10 @@ pub use crate::state::{AgentState, StateLimits, StateSnapshot, StateTransaction}
 
 // Node types
 pub use crate::command::{Command, Navigation, NodeOutput, SendOp};
-pub use crate::join::JoinNode;
+pub use crate::join::{
+    ContradictionMatrix, DedupeByIdentity, JoinCertification, JoinNode, JoinOutcome, JoinStrategy,
+    MinorityReport, ProofCarryingJoin,
+};
 pub use crate::node::{FnNode, Node};
 pub use crate::payload::{Payload, PayloadContext, PayloadError, PayloadNode, PayloadOutput};
 

@@ -1,10 +1,13 @@
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
 
 use ri_agent_graph::event_sink::{EventSink, GraphEvent};
-use ri_agent_graph::join::JoinNode;
+use ri_agent_graph::join::{
+    ContradictionMatrix, DedupeByIdentity, JoinNode, MinorityReport, ProofCarryingJoin,
+};
 use ri_agent_graph::reducer::{AddReducer, AppendReducer, LastWriteWins, MergeReducer};
 use ri_agent_graph::retry::RetryPolicy;
 use ri_agent_graph::AgentGraph;
+use serde_json::Value;
 use tokio::sync::Notify;
 
 use crate::nodes::{
@@ -126,6 +129,7 @@ pub fn compile(spec: &GraphSpec, cx: CompileContext) -> Result<AgentGraph, Strin
                     .unwrap_or("collect_array")
                 {
                     "collect_array" => Box::new(JoinNode::collect_array(inputs, output)),
+                    "collect_object" => Box::new(JoinNode::collect_object(inputs, output)),
                     "merge_objects" => Box::new(JoinNode::merge_objects(inputs, output)),
                     "first_non_null" => Box::new(JoinNode::new(inputs, output, |values| {
                         Ok(values
@@ -162,6 +166,75 @@ pub fn compile(spec: &GraphSpec, cx: CompileContext) -> Result<AgentGraph, Strin
                                 serde_json::json!({"met": approvals >= required, "approvals": approvals, "required": required}),
                             )
                         }))
+                    }
+                    "dedupe_by_identity" => {
+                        let identity_path = node
+                            .config
+                            .get("identity_path")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                        Box::new(JoinNode::strategy(
+                            inputs,
+                            output,
+                            Box::new(DedupeByIdentity { identity_path }),
+                        ))
+                    }
+                    "contradiction_matrix" => {
+                        let get_str = |key: &str, default: &str| -> String {
+                            node.config
+                                .get(key)
+                                .and_then(Value::as_str)
+                                .unwrap_or(default)
+                                .to_owned()
+                        };
+                        Box::new(JoinNode::strategy(
+                            inputs,
+                            output,
+                            Box::new(ContradictionMatrix {
+                                scope_path: get_str("scope_path", "scope"),
+                                claim_path: get_str("claim_path", "claim"),
+                                time_path: get_str("time_path", "time"),
+                                strict: node
+                                    .config
+                                    .get("strict")
+                                    .and_then(Value::as_bool)
+                                    .unwrap_or(false),
+                            }),
+                        ))
+                    }
+                    "minority_report" => {
+                        let dissent_path = node
+                            .config
+                            .get("dissent_path")
+                            .and_then(Value::as_str)
+                            .unwrap_or("dissent")
+                            .to_owned();
+                        Box::new(JoinNode::strategy(
+                            inputs,
+                            output,
+                            Box::new(MinorityReport { dissent_path }),
+                        ))
+                    }
+                    "proof_carrying_join" => {
+                        let required_fields = node
+                            .config
+                            .get("required_fields")
+                            .and_then(Value::as_array)
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(Value::as_str)
+                                    .map(str::to_owned)
+                                    .collect::<Vec<_>>()
+                            })
+                            .filter(|fields| !fields.is_empty())
+                            .unwrap_or_else(|| {
+                                vec!["evidence".into(), "checks".into(), "receipt".into()]
+                            });
+                        Box::new(JoinNode::strategy(
+                            inputs,
+                            output,
+                            Box::new(ProofCarryingJoin { required_fields }),
+                        ))
                     }
                     mode => return Err(format!("unsupported join mode '{mode}'")),
                 }

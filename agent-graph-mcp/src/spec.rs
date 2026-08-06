@@ -590,10 +590,15 @@ fn validate_node(node: &NodeSpec, ids: &BTreeSet<&str>) -> Result<(), String> {
             .unwrap_or("collect_array");
         if ![
             "collect_array",
+            "collect_object",
             "merge_objects",
             "first_non_null",
             "all_success",
             "quorum",
+            "dedupe_by_identity",
+            "contradiction_matrix",
+            "minority_report",
+            "proof_carrying_join",
         ]
         .contains(&mode)
         {
@@ -778,5 +783,29 @@ mod tests {
             ], "edges":[{"from":"left","to":"right"},{"from":"right","to":"END"}]
         });
         assert!(parse_and_validate(&spec).is_ok());
+    }
+
+    #[test]
+    fn swarm_join_modes_are_accepted() {
+        for mode in [
+            "collect_object",
+            "dedupe_by_identity",
+            "contradiction_matrix",
+            "minority_report",
+            "proof_carrying_join",
+        ] {
+            let spec = json!({
+                "name": "join-modes", "entry": "join",
+                "nodes": [
+                    {"id": "join", "type": "join",
+                     "config": {"mode": mode, "inputs": ["branch_a"], "output": "merged"}}
+                ],
+                "edges": [{"from": "join", "to": "END"}]
+            });
+            assert!(
+                parse_and_validate(&spec).is_ok(),
+                "swarm join mode '{mode}' rejected"
+            );
+        }
     }
 }

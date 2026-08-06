@@ -242,6 +242,72 @@ async fn test_payload_node_in_chain() {
 // ---------- JoinNode Tests ----------
 
 #[tokio::test]
+async fn test_join_node_collect_object() {
+    let join = JoinNode::collect_object(vec!["branch_a".into(), "branch_b".into()], "merged");
+
+    let graph = AgentGraph::builder()
+        .add_node(
+            "branch_a_node",
+            node!(|state| async move {
+                state.set("branch_a", json!({"result": "from_a"})).await?;
+                Ok(())
+            }),
+        )
+        .add_node(
+            "branch_b_node",
+            node!(|state| async move {
+                state.set("branch_b", json!({"result": "from_b"})).await?;
+                Ok(())
+            }),
+        )
+        .add_node("join", Box::new(join))
+        .add_edge(START, "branch_a_node")
+        .add_edge(START, "branch_b_node")
+        .add_edge("branch_a_node", "join")
+        .add_edge("branch_b_node", "join")
+        .build()
+        .unwrap();
+
+    let state = AgentState::new();
+    let result = graph.execute(START, state).await.unwrap();
+
+    let merged: Value = result.get("merged").await.unwrap();
+    assert!(merged.is_object(), "collect_object must emit an object");
+    let object = merged.as_object().unwrap();
+    assert_eq!(object.len(), 2);
+    assert_eq!(object["branch_a"]["result"], json!("from_a"));
+    assert_eq!(object["branch_b"]["result"], json!("from_b"));
+}
+
+#[tokio::test]
+async fn test_join_node_collect_object_collision_rejected() {
+    // Duplicate branch keys are a hard error: branch IDs must be stable and
+    // cannot collide.
+    let join = JoinNode::collect_object(vec!["branch_a".into(), "branch_a".into()], "merged");
+
+    let graph = AgentGraph::builder()
+        .add_node(
+            "branch_a_node",
+            node!(|state| async move {
+                state.set("branch_a", json!({"result": "from_a"})).await?;
+                Ok(())
+            }),
+        )
+        .add_node("join", Box::new(join))
+        .add_edge(START, "branch_a_node")
+        .add_edge("branch_a_node", "join")
+        .build()
+        .unwrap();
+
+    let state = AgentState::new();
+    let err = graph.execute(START, state).await.unwrap_err();
+    assert!(
+        err.to_string().contains("duplicate branch key"),
+        "unexpected error: {err}"
+    );
+}
+
+#[tokio::test]
 async fn test_join_node_collect_array() {
     let join = JoinNode::collect_array(vec!["branch_a".into(), "branch_b".into()], "merged");
 
