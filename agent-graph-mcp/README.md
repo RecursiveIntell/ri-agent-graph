@@ -167,7 +167,7 @@ printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion
 | `router` | ✅ | Conditional branching via rules (`path`+`op`+`value`→`targets`) |
 | `passthrough` | ✅ | No-op state pass. Useful for fan-out distribution points |
 | `state_transform` | ✅ | 10 ops: `set`, `copy`, `delete`, `increment`, `append`, `merge`, `merge_object`, `select`, `compare`, `format` |
-| `join` | ✅ | Fan-in merge. 9 modes: `collect_array`, `collect_object`, `merge_objects`, `first_non_null`, `all_success`, `quorum`, `dedupe_by_identity`, `contradiction_matrix`, `minority_report`, `proof_carrying_join` |
+| `join` | ✅ | Fan-in merge. 10 modes: `collect_array`, `collect_object`, `merge_objects`, `first_non_null`, `all_success`, `quorum`, `dedupe_by_identity`, `contradiction_matrix`, `minority_report`, `proof_carrying_join` |
 | `parallel` | ✅ | Fan-out dispatch. Compiler creates passthrough; engine's `JoinSet` handles real parallelism |
 | `subgraph` | ✅ | Execute another registered graph by name (`config.graph_name`, optional `input_key`/`output_key`); runs in-process with shared budgets, depth limit 4 |
 | `loop` | ✅ | Bounded re-entry (`config.entry`, `config.exit`, `config.max_iterations` 1..=32); navigates entry until exhausted, then exit/END |
