@@ -1,60 +1,21 @@
 # ri-agent-graph
 
-**Graph-based agent orchestration for Rust** — a LangGraph-inspired execution engine with 8 node types, parallel fan-out/fan-in, SQLite checkpointing, interrupt/resume, retry policies, event streaming, and HMAC-SHA256 cryptographic receipts.
+A LangGraph-inspired Rust runtime for explicit graph execution, shared state, routing, parallel branches, retries, interrupts, and checkpoint integration.
 
-[![Crates.io](https://img.shields.io/crates/v/ri-agent-graph)](https://crates.io/crates/ri-agent-graph)
-[![docs.rs](https://img.shields.io/docsrs/ri-agent-graph)](https://docs.rs/ri-agent-graph)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE-MIT)
-
-> **If you're building AI agents, multi-step LLM workflows, or agent councils in Rust — this is the runtime.** Define your workflow as a graph, execute it with deterministic state flowing through nodes, and get cryptographic receipts proving what happened.
+The engine coordinates caller-supplied nodes and payloads. The separate MCP adapter defines declarative `llm`, `router`, `join`, and other JSON node types, provider configuration, operator approval storage, and authenticated MCP receipts. Those adapter capabilities are not all built into the engine crate.
 
 ![Architecture](assets/architecture.svg)
 
-## What it gives you
 
-- **8 node types** — `llm`, `router`, `join`, `parallel`, `passthrough`, `state_transform`, `subgraph`, `human_approval` — compose any agent topology
-- **Parallel fan-out/fan-in** with `JoinSet`-backed real concurrency and 5 join modes: `collect_array`, `merge_objects`, `first_non_null`, `all_success`, `quorum`
-- **SQLite checkpointing** — atomic transactions, crash recovery, checkpoint mismatch detection, step-level state snapshots
-- **Interrupt/resume** — pause at any node, inspect state, inject new input, resume from exact checkpoint
-- **HMAC-SHA256 receipts** — `GraphExecutionReceiptV1` with step-level digests, budget counters, and trace IDs
-- **Event streaming** — `StreamExt` over node lifecycle, token output, and state snapshots
-- **Retry policies** — per-node configurable backoff, max retries, predicate filters
-- **stack-ids integration** — `TraceCtx`, `AttemptId`, `TrialId` at every layer for distributed tracing
+## Quick start
 
-![Node Topology](assets/node-topology.svg)
-
-![Lifecycle](assets/lifecycle.svg)
-
-## Prerequisites
-
-- **Rust** 1.75+ ([rustup.rs](https://rustup.rs))
-- **SQLite** — `rusqlite` bundles SQLite via the `bundled` feature; no system library required. Disable with `default-features = false`
-
-## Installation
-
-```bash
-cargo add ri-agent-graph
-```
-
-Or in `Cargo.toml`:
+For a Rust application using the published engine:
 
 ```toml
 [dependencies]
 ri-agent-graph = "0.2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
-
-### Feature flags
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `checkpointing` | ✅ on | SQLite persistence via `rusqlite` (bundled) |
-
-```toml
-# Without checkpointing
-ri-agent-graph = { version = "0.2", default-features = false }
-```
-
-## Quick start
 
 ```rust
 use ri_agent_graph::prelude::*;
@@ -62,284 +23,92 @@ use ri_agent_graph::prelude::*;
 #[tokio::main]
 async fn main() -> Result<()> {
     let graph = AgentGraph::builder()
-        .add_node("step1", node!(|state| async move {
+        .add_node("first", node!(|state| async move {
             state.set("count", 1).await?;
             Ok(())
         }))
-        .add_node("step2", node!(|state| async move {
+        .add_node("second", node!(|state| async move {
             let count: i32 = state.get("count").await?;
             state.set("count", count + 1).await?;
             Ok(())
         }))
-        .add_edge("step1", "step2")
+        .add_edge("first", "second")
         .build()?;
 
-    let result = graph.execute("step1", AgentState::new()).await?;
-    let final_count: i32 = result.get("count").await?;
-    assert_eq!(final_count, 2);
+    let state = graph.execute("first", AgentState::new()).await?;
+    assert_eq!(state.get::<i32>("count").await?, 2);
     Ok(())
 }
 ```
 
-## Core concepts
+This example needs no model server. An LLM-backed node needs the provider configuration and implementation supplied by its caller.
 
-### Graph & state model
+## Engine API
 
-| Type | Role |
-|------|------|
-| `AgentGraph<S>` | Immutable graph: nodes + edges + reducers. Built via builder, validated at `.build()` |
-| `AgentState` | Thread-safe key-value state (`serde_json::Value`) flowing through execution |
-| `GraphExecutor<S>` | Runtime engine. Wraps a graph and optional checkpoint store. Drives the superstep loop |
+| Surface | Current role |
+|---|---|
+| `AgentGraph` / `AgentGraphBuilder` | Define nodes, edges, routers, reducers, execution limits, event sinks, and checkpoint hooks |
+| `AgentState` | Async JSON-valued state with typed reads/writes, limits, snapshots, transactions, and forks |
+| `Node`, `FnNode`, `node!` | Caller-defined executable nodes |
+| `RoutingFunction`, `RouterOutput` | Explicit conditional routing |
+| `Payload`, `PayloadNode` | Adapt reusable work into a node |
+| `RetryPolicy` | Attempt bounds, backoff, jitter, and retry predicates |
+| `CheckpointStore` / `CheckpointSaver` | Checkpoint integration contracts |
+| `GraphEvent`, `EventSink`, `StreamEvent` | Observable execution events |
 
-### Superstep execution loop
+`AgentGraph` is not generic over a state type. `GraphExecutor` is an internal execution detail, not a public constructor. Use the methods on `AgentGraph`, such as `execute`, `execute_with_config`, and `execute_with_summary`.
 
-```
-Dispatch → Execute → Checkpoint → Advance → Repeat
-   │          │           │           │
-   │     JoinSet for     SQLite       END sentinel
-   │     fan-out nodes   atomic tx    or max_iterations
-   │
- Router resolves edges
- to target frontier
-```
-
-## Node types
-
-| Node | Purpose | Example |
-|------|---------|---------|
-| `llm` | Invoke an LLM via `Payload` trait. Response merged by reducer. | Text generation, classification |
-| `router` | Conditional branching. Evaluates predicate → selects next edges. | Route based on LLM output |
-| `parallel` | Fan-out dispatch. Concurrent branches via `JoinSet`. | Multi-agent brainstorming |
-| `join` | Fan-in sync. Waits for all branches, merges with join mode. | Collect parallel results |
-| `passthrough` | No-op pass. Fan-out distribution point. | Bridge coordinator → workers |
-| `state_transform` | 10 ops: `set`, `copy`, `delete`, `increment`, `append`, `merge`, `merge_object`, `select`, `compare`, `format` | Format state between nodes |
-| `subgraph` | Compose another graph as a node. | Reusable multi-step workflows |
-| `human_approval` | HITL gate. Emits `InterruptError`, resumes via checkpoint. | Pause for operator review |
-
-## Router example
+## State and retries
 
 ```rust
-let graph = AgentGraph::builder()
-    .add_node("classify", node!(|state| async move {
-        state.set("category", "bug").await?; Ok(())
-    }))
-    .add_node("handle_bug", node!(|state| async move {
-        state.set("response", "Bug triaged").await?; Ok(())
-    }))
-    .add_node("handle_feature", node!(|state| async move {
-        state.set("response", "Feature scoped").await?; Ok(())
-    }))
-    .add_edge(START, "classify")
-    .add_router("classify", router!(|state| {
-        let category: String = state.get("category").await?;
-        Ok(match category.as_str() {
-            "bug" => vec!["handle_bug"],
-            "feature" => vec!["handle_feature"],
-            _ => vec!["handle_bug"],
-        })
-    }))
-    .add_edge("handle_bug", END)
-    .add_edge("handle_feature", END)
-    .build()?;
-```
-
-## Parallel fan-out with join
-
-```rust
-let graph = AgentGraph::builder()
-    .add_node("coordinator", node!(|state| async move {
-        state.set("work", json!(["A","B","C"])).await?; Ok(())
-    }))
-    .add_node("fanout", passthrough_node!())
-    .add_node("worker_a", node!(|state| async move {
-        state.set("a", "done").await?; Ok(())
-    }))
-    .add_node("worker_b", node!(|state| async move {
-        state.set("b", "done").await?; Ok(())
-    }))
-    .add_node("merger", join_node!(JoinMode::CollectArray, ["a","b"], "results"))
-    .add_edge("coordinator", "fanout")
-    .add_edge("fanout", "worker_a")
-    .add_edge("fanout", "worker_b")
-    .add_edge("worker_a", "merger")
-    .add_edge("worker_b", "merger")
-    .add_edge("merger", END)
-    .build()?;
-```
-
-## State management
-
-```rust
-state.set("name", "agent-graph").await?;
-state.set("count", 42).await?;
-let name: String = state.get("name").await?;
-let maybe: Option<i32> = state.get_opt("missing").await?;
-let keys: Vec<String> = state.keys().await;
-state.remove("temp").await?;
-
-// Snapshot & restore
-let snap = state.snapshot().await;
-state.restore(&snap).await?;
-
-// State limits
-let graph = AgentGraph::builder()
-    .with_state_limits(StateLimits { max_keys: 100, max_value_bytes: 1_048_576 })
-    .build()?;
-```
-
-## Reducers
-
-When parallel branches write the same key, reducers resolve conflicts:
-
-```rust
-Reducers::new()
-    .append_to("findings")           // Concatenate arrays
-    .merge_into("metadata")          // Deep-merge objects
-    .with("counter", Reducer::Add)   // Numeric addition
-    .with("latest", Reducer::LastWriteWins)
-    .with_fn("custom", |existing, incoming| Ok(incoming));
-```
-
-## Checkpointing & interrupt/resume
-
-```rust
-use ri_agent_graph::checkpoint_store::SqliteCheckpointStore;
-
-let store = SqliteCheckpointStore::open("executions.db").await?;
-let executor = GraphExecutor::new(graph).with_checkpoint_store(store);
-
-match executor.execute_with_interrupt(state).await {
-    Ok(receipt) => println!("Completed: {:?}", receipt.run_id),
-    Err(AgentGraphError::Interrupted { checkpoint_id, .. }) => {
-        executor.resume_from(checkpoint_id, injected_input).await?;
-    }
-}
-```
-
-## Retry policies
-
-```rust
+use ri_agent_graph::prelude::*;
 use ri_agent_graph::retry::RetryPolicy;
+use std::time::Duration;
 
-let graph = AgentGraph::builder()
-    .add_node("flaky_api", node!(|state| async move { Ok(()) }))
-    .with_retry_policy("flaky_api", RetryPolicy::new()
-        .max_retries(3)
-        .backoff(Duration::from_millis(100), Duration::from_secs(5))
-        .retry_if(|err| err.to_string().contains("timeout")))
-    .build()?;
-```
+async fn state_example() -> Result<()> {
+    let state = AgentState::new();
+    state.set("count", 1).await?;
+    let snapshot = state.snapshot().await;
+    let removed = state.remove("count").await;
+    assert!(removed.is_some());
+    state.restore(&snapshot).await;
+    Ok(())
+}
 
-## Event streaming
-
-```rust
-use futures::StreamExt;
-
-let mut stream = executor.execute_stream("entry", state).await?;
-while let Some(event) = stream.next().await {
-    match event {
-        StreamEvent::NodeStarted { node_id, attempt, .. } => {},
-        StreamEvent::NodeCompleted { node_id, duration_ms, .. } => {},
-        StreamEvent::TokenStream { node_id, token } => {},
-        StreamEvent::StateSnapshot { state } => {},
-        StreamEvent::Error { node_id, error } => {},
-    }
+fn retry_policy() -> RetryPolicy {
+    RetryPolicy::new()
+        .with_max_attempts(3)
+        .with_initial_interval(Duration::from_millis(100))
+        .with_max_interval(Duration::from_secs(5))
 }
 ```
 
-## Execution receipts
+Attach a retry policy with `AgentGraphBuilder::add_node_with_retry`. `max_attempts` includes the initial attempt. Retries repeat caller-defined work, so side-effecting nodes need an appropriate idempotency policy.
 
-Every run produces a `GraphExecutionReceiptV1`:
+## Checkpoints, interrupts, and streams
 
-```rust
-pub struct GraphExecutionReceiptV1 {
-    pub run_id: String,
-    pub graph_name: String,
-    pub start_time: DateTime<Utc>,
-    pub end_time: DateTime<Utc>,
-    pub steps: Vec<StepExecutionReceiptV1>,
-    pub final_state_digest: String,
-    pub status: ExecutionOutcome,  // Completed | Failed | Interrupted | Cancelled
-}
-```
+Choose a checkpointer or checkpoint store explicitly through the builder. Interrupt/resume APIs and checkpoint metadata are defined by [graph.rs](src/graph.rs), [checkpoint_store.rs](src/checkpoint_store.rs), and [interrupt.rs](src/interrupt.rs). The default `checkpointing` feature enables the SQLite dependency; it does not automatically configure a database for every graph.
 
-## Error handling
+`StreamEvent` includes `GraphStart`, `GraphEnd`, `NodeStart`, `NodeEnd`, `StateUpdate`, `SuperstepStart`, `SuperstepEnd`, `Interrupt`, and `Custom`. It is non-exhaustive. Use the checked-in streaming example rather than assuming provider-token events exist on this engine enum.
 
-```rust
-pub enum AgentGraphError {
-    NodeNotFound(String),
-    RoutingError(String),
-    StateError(String),
-    StateKeyNotFound(String),
-    StateTypeMismatch { key: String, expected: String, actual: String },
-    ParallelWriteConflict(String),
-    StateLimitExceeded { key: String, limit: usize, actual: usize },
-    MaxIterationsExceeded { max: usize },
-    CheckpointError(CheckpointStoreOperation),
-    Interrupted { checkpoint_id: String, node_id: String },
-    ExecutionTimeout { run_id: String, elapsed_ms: u64 },
-    Cancelled { run_id: String },
-    IntegrityKeyRequired,
-    Internal(String),
-}
-```
+## Receipts and trust
 
-## Ecosystem
+[receipt.rs](src/receipt.rs) defines `GraphExecutionReceiptV1` with `graph_id`, `execution_id`, timestamps, steps, and outcome. The type contains caller-populated digest fields; this engine crate does not implement HMAC signing. An execution result or digest alone is not independent proof that a model's answer is true. Authenticated receipts and operator authority in `agent-graph-mcp` belong to that separate adapter.
 
-| Crate | Description | Version |
-|-------|-------------|---------|
-| [ri-agent-graph](https://crates.io/crates/ri-agent-graph) | Core engine (this crate) | v0.2.2 |
-| [agent-graph-mcp](https://crates.io/crates/agent-graph-mcp) | MCP server — 25 typed tools | v0.2.4 |
-| [stack-ids](https://crates.io/crates/stack-ids) | Trace/identity primitives | v0.1.3 |
-| [llm-pipeline](https://crates.io/crates/llm-pipeline) | Reusable LLM node payloads | v0.2.0 |
+## Examples and validation
 
-## Comparison
+The [examples directory](examples/) covers basic graphs, conditional routing, loops, parallel execution, map/reduce, reducers, checkpoints, human-in-the-loop behavior, retries, streaming, and subgraphs. Inspect each example's model or feature requirements before running it.
 
-| Feature | ri-agent-graph | LangGraph (Python) |
-|---------|:---:|:---:|
-| Language | Rust | Python |
-| Type safety | ✅ Compile-time | ❌ Runtime |
-| Parallel fan-out | ✅ `JoinSet` native | ✅ asyncio |
-| Checkpointing | ✅ SQLite bundled | ✅ Postgres/SQLite |
-| Cryptographic receipts | ✅ HMAC-SHA256 | ❌ |
-| Retry policies | ✅ Per-node, predicate | ✅ Per-node |
-| Event streaming | ✅ `StreamExt` | ✅ |
-| MCP protocol server | ✅ Built-in | ❌ |
-| Zero-copy state | ✅ `serde_json::Value` | ❌ Python dict |
-
-## Claim boundaries
-
-- **Graph execution semantics only** — this crate does not include LLM provider clients, prompt templating, or response parsing. Those belong in `llm-pipeline` or your application.
-- **Receipts prove structural execution** — they carry digests of the local execution trace. They do not prove an external model call occurred.
-- **Interrupt/resume is deterministic local** — supports linear `passthrough`/`state_transform` chains. Does not resume across LLM calls or network I/O.
-- **Parallelism is best-effort** — unordered parallel writes to the same key are rejected without an explicit `Reducer`.
-
-## Verification
+From the `ri-agent-graph` workspace root:
 
 ```bash
-cargo build --release -p ri-agent-graph
-cargo test -p ri-agent-graph                          # 149 tests
-cargo clippy -p ri-agent-graph -- -D warnings
-cargo fmt --check
+cargo run -p ri-agent-graph --example basic
+cargo test -p ri-agent-graph
+cargo clippy -p ri-agent-graph --all-targets -- -D warnings
 ```
 
-## Roadmap
-
-- [ ] Typed state extractors (derive macro for `StateExtract`)
-- [ ] Graph visualization (Mermaid/DOT export)
-- [ ] Streaming LLM token passthrough
-- [ ] Distributed checkpoint backends (PostgreSQL, S3)
-- [ ] Subgraph composition with state isolation
-- [ ] WebAssembly target
-
-## Contributing
-
-PRs welcome. See the [ri-agent-graph repo](https://github.com/RecursiveIntell/ri-agent-graph) for source and issues.
+A source or test count is not a stable API contract; use the test output for the exact revision and enabled features.
 
 ## License
 
-MIT — see [LICENSE-MIT](LICENSE-MIT).
-
----
-
-Built by [RecursiveIntell](https://github.com/RecursiveIntell) — an applied R&D studio building local-first AI infrastructure.
+The package declares MIT. See [the workspace license](../LICENSE-MIT).

@@ -12,10 +12,10 @@
 
 | Crate | crates.io | Description |
 |-------|-----------|-------------|
-| **[ri-agent-graph](./agent-graph/)** | [![v0.2.2](https://img.shields.io/crates/v/ri-agent-graph)](https://crates.io/crates/ri-agent-graph) | Core engine — `AgentGraph`, `GraphExecutor`, 8 node types, checkpointing, receipts, 149 tests |
-| **[agent-graph-mcp](./agent-graph-mcp/)** | [![v0.2.4](https://img.shields.io/crates/v/agent-graph-mcp)](https://crates.io/crates/agent-graph-mcp) | MCP server — 25 typed tools, daemon/proxy, HITL, witnesses, templates |
+| **[ri-agent-graph](./agent-graph/)** | [![engine release](https://img.shields.io/crates/v/ri-agent-graph)](https://crates.io/crates/ri-agent-graph) | Core engine — `AgentGraph`, caller-defined nodes, checkpointing, event streams, and receipt types |
+| **[agent-graph-mcp](./agent-graph-mcp/)** | [![MCP release](https://img.shields.io/crates/v/agent-graph-mcp)](https://crates.io/crates/agent-graph-mcp) | MCP server — 25 typed tools, daemon/proxy, HITL, witnesses, templates |
 
-> **The MCP server now has its own dedicated repo at [RecursiveIntell/agent-graph-mcp](https://github.com/RecursiveIntell/agent-graph-mcp)**
+> The checked-in engine is 0.2.4 and this workspace's MCP package is 0.2.3. The independently maintained [agent-graph-mcp repository](https://github.com/RecursiveIntell/agent-graph-mcp) and its registry releases can be newer; its install command below does not select this workspace snapshot.
 
 ## Quick start
 
@@ -42,7 +42,7 @@ let result = graph.execute(START, AgentState::new()).await?;
 ### MCP server
 
 ```bash
-npx -y @recursiveintell/agent-graph-mcp --direct --base-url http://127.0.0.1:11434 --model glm-5.2:cloud
+npx -y @recursiveintell/agent-graph-mcp --direct --base-url http://127.0.0.1:11434 --model llama3.2:3b
 ```
 
 ## Architecture
@@ -70,7 +70,7 @@ Fan out to 9 LLM nodes in parallel via `JoinSet`-backed concurrency, then join i
     {"id": "agent_5", "type": "llm", "prompt": "Analyze dim 3: {input}"},
     {"id": "agent_6", "type": "llm", "prompt": "Critique angle X: {input}"},
     {"id": "agent_7", "type": "llm", "prompt": "Critique angle Y: {input}"},
-    {"id": "agent_8", "type": "llm", "prompt": "Synthesize: {collected}"},
+    {"id": "agent_8", "type": "llm", "prompt": "Evaluate the remaining risks: {input}"},
     {"id": "join", "type": "join", "config": {"inputs": ["agent_0","agent_1","agent_2","agent_3","agent_4","agent_5","agent_6","agent_7","agent_8"], "output": "collected", "mode": "collect_array"}},
     {"id": "report", "type": "llm", "prompt": "Final report from: {collected}"}
   ],
@@ -124,16 +124,16 @@ Scale from 1 to 16 parallel branches. Join modes: `collect_array`, `merge_object
 
 | Crate | Version | Role |
 |-------|---------|------|
-| `ri-agent-graph` | v0.2.2 | Core engine |
-| `agent-graph-mcp` | v0.2.4 | MCP protocol server |
+| `ri-agent-graph` | local 0.2.4 | Core engine |
+| `agent-graph-mcp` | local 0.2.3 | MCP protocol server |
 | `stack-ids` | v0.1.3 | Trace/identity primitives |
-| `llm-pipeline` | v0.2.0 | Reusable LLM node payloads |
+| `llm-pipeline` | dependency 0.2 | Reusable LLM node payloads |
 
 ## Verification
 
 ```bash
-cargo test -p ri-agent-graph              # 149 tests
-cargo test -p agent-graph-mcp --lib       # 116 tests
+cargo test -p ri-agent-graph
+cargo test -p agent-graph-mcp --lib
 cargo clippy -- -D warnings
 ```
 
