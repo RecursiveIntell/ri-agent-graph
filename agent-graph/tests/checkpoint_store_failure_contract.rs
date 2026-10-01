@@ -240,3 +240,122 @@ async fn no_store_execution_remains_compatible() {
     let completed: bool = result.get("completed").await.unwrap();
     assert!(completed);
 }
+
+#[tokio::test]
+async fn record_attempt_failure_prevents_context_executor_invocation() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct CountExecutor(Arc<AtomicUsize>);
+        impl Executor for CountExecutor {
+            fn execute_node(
+                &self,
+                _: Arc<dyn Node>,
+                _: AgentState,
+                _: GraphConfig,
+            ) -> Pin<Box<dyn Future<Output = Result<NodeOutput>> + Send>> {
+                Box::pin(async { panic!("legacy entrypoint must not be used") })
+            }
+            fn execute_node_with_context(
+                &self,
+                _: Arc<dyn Node>,
+                _: AgentState,
+                _: GraphConfig,
+                _: NodeExecutionContext,
+            ) -> Pin<Box<dyn Future<Output = Result<NodeOutput>> + Send>> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(NodeOutput::Done) })
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let graph = AgentGraph::builder()
+            .with_executor(Arc::new(CountExecutor(calls.clone())))
+            .with_checkpoint_store(Arc::new(FailingCheckpointStore::new(
+                CheckpointStoreOperation::RecordAttempt,
+            )))
+            .add_node("step", node!(|_state| async move { Ok(()) }))
+            .build()
+            .unwrap();
+        assert_checkpoint_store_failure(
+            graph.execute("step", AgentState::new()).await,
+            CheckpointStoreOperation::RecordAttempt,
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    })
+    .await
+    .expect("30-second case limit");
+}
+
+#[tokio::test]
+async fn all_root_creation_failures_and_record_failure_prevent_node_context_calls() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct CountNode(Arc<AtomicUsize>);
+        #[async_trait::async_trait]
+        impl Node for CountNode {
+            async fn execute(&self, _: &AgentState, _: &GraphConfig) -> Result<NodeOutput> {
+                panic!("legacy node entry")
+            }
+            async fn execute_with_context(
+                &self,
+                _: &AgentState,
+                _: &GraphConfig,
+                _: NodeExecutionContext,
+            ) -> Result<NodeOutput> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(NodeOutput::Done)
+            }
+        }
+        for mode in 0..5 {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let operation = if mode == 4 {
+                CheckpointStoreOperation::RecordAttempt
+            } else {
+                CheckpointStoreOperation::CreateRun
+            };
+            let graph = Arc::new(
+                AgentGraph::builder()
+                    .with_checkpoint_store(Arc::new(FailingCheckpointStore::new(operation)))
+                    .add_node("step", Box::new(CountNode(calls.clone())))
+                    .build()
+                    .unwrap(),
+            );
+            let state = AgentState::new();
+            state.set("original", true).await.unwrap();
+            match mode {
+                0 => {
+                    let (result, summary) = graph
+                        .execute_with_summary("step", state, GraphConfig::default())
+                        .await;
+                    assert_checkpoint_store_failure(result, operation);
+                    assert!(summary.run_id.is_empty());
+                    assert_eq!(summary.status, RunStatus::Failed);
+                }
+                1 => {
+                    match graph
+                        .execute_with_interrupt("step", state, GraphConfig::default())
+                        .await
+                    {
+                        ExecutionResult::Failed { error, state } => {
+                            assert_checkpoint_store_failure(Err(error), operation);
+                            assert!(state.get::<bool>("original").await.unwrap());
+                        }
+                        _ => panic!("expected Failed"),
+                    }
+                }
+                2 => {
+                    let (h, _) = graph.execute_cancellable("step", state, GraphConfig::default());
+                    assert_checkpoint_store_failure(h.await.expect("not task panic"), operation);
+                }
+                3 => {
+                    let (h, mut rx) = graph.stream("step", state, GraphConfig::default());
+                    assert_checkpoint_store_failure(h.await.expect("not task panic"), operation);
+                    assert!(rx.recv().await.is_none());
+                }
+                _ => assert_checkpoint_store_failure(graph.execute("step", state).await, operation),
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+        }
+    })
+    .await
+    .expect("30s case bound");
+}
