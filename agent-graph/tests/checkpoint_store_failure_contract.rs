@@ -240,3 +240,47 @@ async fn no_store_execution_remains_compatible() {
     let completed: bool = result.get("completed").await.unwrap();
     assert!(completed);
 }
+
+#[tokio::test]
+async fn record_attempt_failure_prevents_context_executor_invocation() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct CountExecutor(Arc<AtomicUsize>);
+        impl Executor for CountExecutor {
+            fn execute_node(
+                &self,
+                _: Arc<dyn Node>,
+                _: AgentState,
+                _: GraphConfig,
+            ) -> Pin<Box<dyn Future<Output = Result<NodeOutput>> + Send>> {
+                Box::pin(async { panic!("legacy entrypoint must not be used") })
+            }
+            fn execute_node_with_context(
+                &self,
+                _: Arc<dyn Node>,
+                _: AgentState,
+                _: GraphConfig,
+                _: NodeExecutionContext,
+            ) -> Pin<Box<dyn Future<Output = Result<NodeOutput>> + Send>> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(NodeOutput::Done) })
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let graph = AgentGraph::builder()
+            .with_executor(Arc::new(CountExecutor(calls.clone())))
+            .with_checkpoint_store(Arc::new(FailingCheckpointStore::new(
+                CheckpointStoreOperation::RecordAttempt,
+            )))
+            .add_node("step", node!(|_state| async move { Ok(()) }))
+            .build()
+            .unwrap();
+        assert_checkpoint_store_failure(
+            graph.execute("step", AgentState::new()).await,
+            CheckpointStoreOperation::RecordAttempt,
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    })
+    .await
+    .expect("30-second case limit");
+}

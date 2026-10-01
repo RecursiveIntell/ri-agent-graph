@@ -39,7 +39,7 @@ pub use crate::checkpoint_store::{
 pub use crate::checkpointer::{CheckpointSaver, MemorySaver};
 
 // Executor
-pub use crate::executor::{Executor, InProcessExecutor};
+pub use crate::executor::{Executor, InProcessExecutor, NodeExecutionContext};
 
 // Reducers
 pub use crate::reducer::{
