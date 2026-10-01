@@ -467,190 +467,6 @@ impl AgentGraphServer {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::run_manager::RunManager;
-    use crate::store::PersistentStore;
-
-    fn configure_test_integrity_key() {
-        let path = std::env::temp_dir().join("agent-graph-mcp-unit-integrity.key");
-        std::fs::write(&path, [0x5au8; 32]).expect("test integrity key");
-        std::env::set_var("AGENT_GRAPH_INTEGRITY_KEY_PATH", path);
-    }
-
-    #[test]
-    fn terminal_projection_failure_rolls_back_sqlite_and_marks_run_volatile() {
-        configure_test_integrity_key();
-        let temp = tempfile::tempdir().expect("temp graph database");
-        let store = PersistentStore::open(temp.path()).expect("store");
-        let spec: GraphSpec = serde_json::from_value(serde_json::json!({
-            "name":"fault-injection",
-            "entry":"x",
-            "nodes":[{"id":"x","type":"passthrough"}],
-            "edges":[{"from":"x","to":"END"}]
-        }))
-        .expect("graph spec");
-        let spec_json = serde_json::to_string(&spec).expect("spec JSON");
-        store
-            .save_graph("fault-injection", &spec_json, "version", false)
-            .expect("graph");
-
-        let runs = RunManager::default();
-        let run_id = runs
-            .allocate("fault-injection", "version", serde_json::json!({"x":1}))
-            .expect("run");
-        store
-            .save_execution(
-                &run_id,
-                "fault-injection",
-                "version",
-                "running",
-                "{\"x\":1}",
-            )
-            .expect("execution");
-        runs.execute(
-            &run_id,
-            spec,
-            "http://localhost".into(),
-            "test-model".into(),
-        )
-        .expect("execution completes");
-
-        store.fail_terminal_projection_after_events();
-        AgentGraphServer::persist_terminal_and_mark(
-            runs.clone(),
-            Some(store.clone()),
-            runs.get(&run_id).expect("terminal record"),
-        );
-
-        let public = runs.get(&run_id).expect("volatile record").public();
-        assert_eq!(public["persistence_status"], "volatile_persistence_failed");
-        assert_eq!(public["storage_class"], "volatile");
-
-        let reopened = PersistentStore::open(temp.path()).expect("fresh store");
-        assert_eq!(
-            reopened.load_execution(&run_id).unwrap().unwrap()["status"],
-            "running"
-        );
-        assert!(reopened.load_events(&run_id, 0, 100).unwrap().is_none());
-        assert!(reopened.load_terminal_receipt(&run_id).unwrap().is_none());
-    }
-
-    #[test]
-    fn capacity_is_reserved_before_direct_or_approved_checkpoint_consumption() {
-        configure_test_integrity_key();
-        let temp = tempfile::tempdir().expect("checkpoint database");
-        let server = AgentGraphServer::new(
-            "http://localhost".into(),
-            "test-model".into(),
-            Some(temp.path().to_owned()),
-            None,
-        )
-        .expect("server");
-        server
-            .graph_create(Parameters(GraphCreateParams {
-                spec: Some(serde_json::json!({
-                    "name":"capacity-resume", "entry":"first",
-                    "nodes":[
-                        {"id":"first","type":"passthrough"},
-                        {"id":"second","type":"state_transform","config":{"operations":[{"op":"set","path":"done","value":true}]}}
-                    ],
-                    "edges":[{"from":"first","to":"second"},{"from":"second","to":"END"}]
-                })),
-                action: None,
-                graph_id: None,
-                idempotency_key: None,
-                template: None,
-                overwrite: None,
-            }))
-            .expect("create graph");
-        let checkpoint = |server: &AgentGraphServer| {
-            server
-                .graph_run_start(Parameters(RunStartParams {
-                    graph_id: "capacity-resume".into(),
-                    input: None,
-                    graph_version: None,
-                    thread_id: None,
-                    idempotency_key: None,
-                    budgets: None,
-                    checkpoint: Some(true),
-                }))
-                .expect("checkpoint start")
-                .0
-                .data
-                .unwrap()["checkpoint_id"]
-                .as_str()
-                .unwrap()
-                .to_owned()
-        };
-        let direct_checkpoint = checkpoint(&server);
-        {
-            let runs = server.runs.lock().expect("runs");
-            for index in 0..8 {
-                let run_id = runs
-                    .allocate("capacity", "v1", serde_json::json!({"index":index}))
-                    .expect("slot record");
-                runs.admit_async(&run_id).expect("slot admission");
-            }
-        }
-        let direct = server
-            .graph_run_resume(Parameters(RunResumeParams {
-                checkpoint_id: Some(direct_checkpoint.clone()),
-                run_id: None,
-            }))
-            .expect("resume response");
-        assert_eq!(direct.0.error_code.as_deref(), Some("RUN_CAPACITY"));
-        let store = server.store.as_ref().expect("store");
-        assert!(store
-            .load_resume_checkpoint(Some(&direct_checkpoint), None)
-            .expect("checkpoint")
-            .expect("record")
-            .consumed_at
-            .is_none());
-
-        let approval_checkpoint = checkpoint(&server);
-        let approval = server
-            .graph_approval_request(Parameters(ApprovalRequestParams {
-                checkpoint_id: approval_checkpoint.clone(),
-                audience: "operator".into(),
-                prompt: "approve after capacity is available".into(),
-                allowed_decisions: vec!["approve".into()],
-                expiration: (Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
-            }))
-            .expect("approval request");
-        let approval_id = approval.0.data.unwrap()["approval_id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        let decided = server
-            .graph_approval_decide(Parameters(ApprovalDecideParams {
-                approval_id: approval_id.clone(),
-                decision: "approve".into(),
-                claimed_actor_label: "operator".into(),
-            }))
-            .expect("approval response");
-        assert_eq!(
-            decided.0.error_code.as_deref(),
-            Some("AUTHENTICATED_OPERATOR_REQUIRED")
-        );
-        assert_eq!(
-            store
-                .get_checkpoint_approval(&approval_id)
-                .expect("approval")
-                .expect("approval row")
-                .status,
-            "pending"
-        );
-        assert!(store
-            .load_resume_checkpoint(Some(&approval_checkpoint), None)
-            .expect("checkpoint")
-            .expect("record")
-            .consumed_at
-            .is_none());
-    }
-}
-
 #[tool_router]
 impl AgentGraphServer {
     // ── graph_create ──────────────────────────────────────────────────
@@ -718,7 +534,7 @@ impl AgentGraphServer {
             let tpl_name = tpl_val
                 .get("name")
                 .and_then(Value::as_str)
-                .or_else(|| graph_id.as_deref())
+                .or(graph_id.as_deref())
                 .unwrap_or(tpl_id);
             templates::instantiate(tpl_id, tpl_name)
                 .map_err(|e| internal_error(format!("template error: {e}")))?
@@ -872,7 +688,7 @@ impl AgentGraphServer {
         }): Parameters<GraphExecuteParams>,
     ) -> Result<Json<StructuredOutput>, ErrorData> {
         let input = input.unwrap_or(Value::Null);
-        ensure_size(&input, MAX_INPUT_BYTES, "execution input").map_err(|e| invalid_params(e))?;
+        ensure_size(&input, MAX_INPUT_BYTES, "execution input").map_err(invalid_params)?;
 
         let graph = self.resolve_graph(&graph_id, graph_version.as_deref())?;
 
@@ -907,7 +723,7 @@ impl AgentGraphServer {
 
         let run_id = runs
             .allocate(&graph_id, &graph.version, input.clone())
-            .map_err(|e| internal_error(e))?;
+            .map_err(internal_error)?;
 
         if let Err(e) = runs.admit_async(&run_id) {
             runs.remove(&run_id);
@@ -1260,7 +1076,7 @@ impl AgentGraphServer {
                 let limit_val = limit.unwrap_or(100) as usize;
                 let result = runs
                     .events(self.store.as_ref(), id, cursor_val, limit_val)
-                    .map_err(|e| invalid_params(e))?;
+                    .map_err(invalid_params)?;
                 Ok(output_with_meta(result, None, None, Some(id)))
             }
 
@@ -1715,10 +1531,10 @@ impl AgentGraphServer {
             claimed_actor_label: _,
         }): Parameters<ApprovalDecideParams>,
     ) -> Result<Json<StructuredOutput>, ErrorData> {
-        return Ok(error_output(
+        Ok(error_output(
             "approval decisions require authenticated operator transport",
             "AUTHENTICATED_OPERATOR_REQUIRED",
-        ));
+        ))
     }
 
     // ── Async run lifecycle ───────────────────────────────────────────
@@ -1744,7 +1560,7 @@ impl AgentGraphServer {
         };
         let input = input.unwrap_or(Value::Null);
         let checkpoint_requested = checkpoint.unwrap_or(false);
-        ensure_size(&input, MAX_INPUT_BYTES, "execution input").map_err(|e| invalid_params(e))?;
+        ensure_size(&input, MAX_INPUT_BYTES, "execution input").map_err(invalid_params)?;
 
         let RegisteredGraph {
             spec,
@@ -1816,7 +1632,7 @@ impl AgentGraphServer {
                     input.clone(),
                     requested_budgets.clone(),
                 )
-                .map_err(|e| internal_error(e))?;
+                .map_err(internal_error)?;
             if let Err(error) = store.save_execution_with_budgets(
                 &run_id,
                 &graph_id,
@@ -1877,7 +1693,7 @@ impl AgentGraphServer {
 
         let run_id = runs
             .allocate_with_budgets(&graph_id, &version, input.clone(), requested_budgets)
-            .map_err(|e| internal_error(e))?;
+            .map_err(internal_error)?;
         if let Err(e) = runs.admit_async(&run_id) {
             runs.remove(&run_id);
             return Ok(error_output(e, "RUN_CAPACITY"));
@@ -1946,7 +1762,7 @@ impl AgentGraphServer {
             Ok(Some(record))
                 if run_id
                     .as_deref()
-                    .is_none_or(|run_id| record.run_id == run_id) =>
+                    .map_or(true, |run_id| record.run_id == run_id) =>
             {
                 Ok(output_with_meta(
                     checkpoint_value(&record),
@@ -2262,7 +2078,7 @@ impl AgentGraphServer {
                 cursor.unwrap_or(0),
                 limit.unwrap_or(100) as usize,
             )
-            .map_err(|e| invalid_params(e))?;
+            .map_err(invalid_params)?;
         Ok(output_with_meta(result, None, None, Some(&run_id)))
     }
 
@@ -2443,3 +2259,271 @@ impl AgentGraphServer {
     instructions = "Graph orchestration for bounded multi-step LLM workflows with parallel fan-out, conditional routing, state transforms, joins, cooperative cancellation, and optional enforced max_wall_clock_ms/max_nodes run budgets. max_llm_calls is rejected with INVALID_BUDGETS because no real invocation hook exists in this runtime path. Parallel unordered state writes require an explicit reducer. Cancellation can drop the local provider future on request, best effort; an underlying provider request may continue. Optional SQLite stores terminal projections plus explicit pre-execution checkpoints. Durable checkpoints, approvals, terminal receipts, and source witnesses require an external key file named by AGENT_GRAPH_INTEGRITY_KEY_PATH; without it their operations fail closed with INTEGRITY_KEY_REQUIRED. Deterministic local resume is limited to linear passthrough/state_transform chains and is never generic replay; uncheckpointed or ineligible runs remain interrupted_non_resumable after restart. SQLite-backed approvals can decide only an immutable deterministic-local checkpoint and resume that checkpoint; HumanApproval nodes and arbitrary external actions remain unsupported. Source witnesses are caller-supplied local captures: locators are never fetched, HMAC-authenticated witness integrity and bounded evidence spans are checked against SQLite, and source authority is not independently verified. Receipts provide integrity_only except a successfully resumed deterministic-local path, which reports deterministic_local_resume. Define graphs with graph_create, execute with graph_execute or graph_run_start, checkpoint with checkpoint:true, inspect with graph_run_get/wait/cancel/state/events/receipt/checkpoint, request or decide checkpoint approvals with graph_approval_request/decide, and resume with graph_run_resume."
 )]
 impl ServerHandler for AgentGraphServer {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::run_manager::RunManager;
+    use crate::store::PersistentStore;
+
+    fn configure_test_integrity_key() {
+        let path = std::env::temp_dir().join("agent-graph-mcp-unit-integrity.key");
+        std::fs::write(&path, [0x5au8; 32]).expect("test integrity key");
+        std::env::set_var("AGENT_GRAPH_INTEGRITY_KEY_PATH", path);
+    }
+
+    #[test]
+    fn terminal_projection_failure_rolls_back_sqlite_and_marks_run_volatile() {
+        configure_test_integrity_key();
+        let temp = tempfile::tempdir().expect("temp graph database");
+        let store = PersistentStore::open(temp.path()).expect("store");
+        let spec: GraphSpec = serde_json::from_value(serde_json::json!({
+            "name":"fault-injection",
+            "entry":"x",
+            "nodes":[{"id":"x","type":"passthrough"}],
+            "edges":[{"from":"x","to":"END"}]
+        }))
+        .expect("graph spec");
+        let spec_json = serde_json::to_string(&spec).expect("spec JSON");
+        store
+            .save_graph("fault-injection", &spec_json, "version", false)
+            .expect("graph");
+
+        let runs = RunManager::default();
+        let run_id = runs
+            .allocate("fault-injection", "version", serde_json::json!({"x":1}))
+            .expect("run");
+        store
+            .save_execution(
+                &run_id,
+                "fault-injection",
+                "version",
+                "running",
+                "{\"x\":1}",
+            )
+            .expect("execution");
+        runs.execute(
+            &run_id,
+            spec,
+            "http://localhost".into(),
+            "test-model".into(),
+        )
+        .expect("execution completes");
+
+        store.fail_terminal_projection_after_events();
+        AgentGraphServer::persist_terminal_and_mark(
+            runs.clone(),
+            Some(store.clone()),
+            runs.get(&run_id).expect("terminal record"),
+        );
+
+        let public = runs.get(&run_id).expect("volatile record").public();
+        assert_eq!(public["persistence_status"], "volatile_persistence_failed");
+        assert_eq!(public["storage_class"], "volatile");
+
+        let reopened = PersistentStore::open(temp.path()).expect("fresh store");
+        assert_eq!(
+            reopened.load_execution(&run_id).unwrap().unwrap()["status"],
+            "running"
+        );
+        assert!(reopened.load_events(&run_id, 0, 100).unwrap().is_none());
+        assert!(reopened.load_terminal_receipt(&run_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn capacity_is_reserved_before_direct_or_approved_checkpoint_consumption() {
+        configure_test_integrity_key();
+        let temp = tempfile::tempdir().expect("checkpoint database");
+        let server = AgentGraphServer::new(
+            "http://localhost".into(),
+            "test-model".into(),
+            Some(temp.path().to_owned()),
+            None,
+        )
+        .expect("server");
+        server
+            .graph_create(Parameters(GraphCreateParams {
+                spec: Some(serde_json::json!({
+                    "name":"capacity-resume", "entry":"first",
+                    "nodes":[
+                        {"id":"first","type":"passthrough"},
+                        {"id":"second","type":"state_transform","config":{"operations":[{"op":"set","path":"done","value":true}]}}
+                    ],
+                    "edges":[{"from":"first","to":"second"},{"from":"second","to":"END"}]
+                })),
+                action: None,
+                graph_id: None,
+                idempotency_key: None,
+                template: None,
+                overwrite: None,
+            }))
+            .expect("create graph");
+        let checkpoint = |server: &AgentGraphServer| {
+            server
+                .graph_run_start(Parameters(RunStartParams {
+                    graph_id: "capacity-resume".into(),
+                    input: None,
+                    graph_version: None,
+                    thread_id: None,
+                    idempotency_key: None,
+                    budgets: None,
+                    checkpoint: Some(true),
+                }))
+                .expect("checkpoint start")
+                .0
+                .data
+                .unwrap()["checkpoint_id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let direct_checkpoint = checkpoint(&server);
+        {
+            let runs = server.runs.lock().expect("runs");
+            for index in 0..8 {
+                let run_id = runs
+                    .allocate("capacity", "v1", serde_json::json!({"index":index}))
+                    .expect("slot record");
+                runs.admit_async(&run_id).expect("slot admission");
+            }
+        }
+        let direct = server
+            .graph_run_resume(Parameters(RunResumeParams {
+                checkpoint_id: Some(direct_checkpoint.clone()),
+                run_id: None,
+            }))
+            .expect("resume response");
+        assert_eq!(direct.0.error_code.as_deref(), Some("RUN_CAPACITY"));
+        let store = server.store.as_ref().expect("store");
+        assert!(store
+            .load_resume_checkpoint(Some(&direct_checkpoint), None)
+            .expect("checkpoint")
+            .expect("record")
+            .consumed_at
+            .is_none());
+
+        let approval_checkpoint = checkpoint(&server);
+        let approval = server
+            .graph_approval_request(Parameters(ApprovalRequestParams {
+                checkpoint_id: approval_checkpoint.clone(),
+                audience: "operator".into(),
+                prompt: "approve after capacity is available".into(),
+                allowed_decisions: vec!["approve".into()],
+                expiration: (Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+            }))
+            .expect("approval request");
+        let approval_id = approval.0.data.unwrap()["approval_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let decided = server
+            .graph_approval_decide(Parameters(ApprovalDecideParams {
+                approval_id: approval_id.clone(),
+                decision: "approve".into(),
+                claimed_actor_label: "operator".into(),
+            }))
+            .expect("approval response");
+        assert_eq!(
+            decided.0.error_code.as_deref(),
+            Some("AUTHENTICATED_OPERATOR_REQUIRED")
+        );
+        assert_eq!(
+            store
+                .get_checkpoint_approval(&approval_id)
+                .expect("approval")
+                .expect("approval row")
+                .status,
+            "pending"
+        );
+        assert!(store
+            .load_resume_checkpoint(Some(&approval_checkpoint), None)
+            .expect("checkpoint")
+            .expect("record")
+            .consumed_at
+            .is_none());
+    }
+}
+
+#[cfg(test)]
+mod l1_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn checkpoint_read_preserves_optional_run_id_and_integrity_refusals() {
+        let path = std::env::temp_dir().join("agent-graph-mcp-unit-integrity.key");
+        std::fs::write(&path, [0x5au8; 32]).unwrap();
+        std::env::set_var("AGENT_GRAPH_INTEGRITY_KEY_PATH", path);
+        let temp = tempfile::tempdir().unwrap();
+        let server = AgentGraphServer::new(
+            "http://localhost".into(),
+            "test-model".into(),
+            Some(temp.path().to_owned()),
+            None,
+        )
+        .unwrap();
+        let created = server.graph_create(Parameters(GraphCreateParams {
+            spec: Some(serde_json::json!({
+                "name":"checkpoint-guard", "entry":"first",
+                "nodes":[{"id":"first", "type":"passthrough"}, {"id":"second", "type":"passthrough"}],
+                "edges":[{"from":"first", "to":"second"}, {"from":"second", "to":"END"}]
+            })),
+            action: None, graph_id: None, idempotency_key: None, template: None, overwrite: None,
+        })).unwrap();
+        assert!(created.0.error_code.is_none());
+        let started = server
+            .graph_run_start(Parameters(RunStartParams {
+                graph_id: "checkpoint-guard".into(),
+                input: None,
+                graph_version: None,
+                thread_id: None,
+                idempotency_key: None,
+                budgets: None,
+                checkpoint: Some(true),
+            }))
+            .unwrap();
+        assert!(started.0.error_code.is_none());
+        let data = started.0.data.unwrap();
+        let checkpoint_id = data["checkpoint_id"].as_str().unwrap().to_owned();
+        let run_id = data["run_id"].as_str().unwrap().to_owned();
+        for requested_run in [None, Some(run_id.clone())] {
+            let response = server
+                .graph_run_checkpoint(Parameters(RunCheckpointParams {
+                    checkpoint_id: Some(checkpoint_id.clone()),
+                    run_id: requested_run,
+                }))
+                .unwrap();
+            assert!(response.0.error_code.is_none());
+            assert_eq!(response.0.data.unwrap()["run_id"], run_id);
+        }
+        for requested_run in ["different-run", ""] {
+            let response = server
+                .graph_run_checkpoint(Parameters(RunCheckpointParams {
+                    checkpoint_id: Some(checkpoint_id.clone()),
+                    run_id: Some(requested_run.into()),
+                }))
+                .unwrap();
+            assert_eq!(
+                response.0.error_code.as_deref(),
+                Some("CHECKPOINT_INTEGRITY_FAILURE")
+            );
+        }
+        let missing = server
+            .graph_run_checkpoint(Parameters(RunCheckpointParams {
+                checkpoint_id: None,
+                run_id: None,
+            }))
+            .unwrap();
+        assert_eq!(missing.0.error_code.as_deref(), Some("INVALID_PARAMS"));
+        for wrong_type in [
+            serde_json::json!(false),
+            serde_json::json!(7),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            assert!(serde_json::from_value::<RunCheckpointParams>(
+                serde_json::json!({"checkpoint_id":checkpoint_id,"run_id":wrong_type})
+            )
+            .is_err());
+        }
+    }
+}

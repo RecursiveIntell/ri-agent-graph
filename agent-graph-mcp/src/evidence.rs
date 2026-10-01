@@ -372,14 +372,14 @@ pub fn validate_research_evidence(value: &Value) -> Result<(), String> {
         if source
             .get("source_type")
             .and_then(Value::as_str)
-            .is_none_or(|source_type| source_type.trim().is_empty())
+            .map_or(true, |source_type| source_type.trim().is_empty())
         {
             return Err(format!(
                 "research evidence source {index} requires a non-empty source_type"
             ));
         }
         if let Some(witness_id) = source.get("witness_id") {
-            if witness_id.as_str().is_none_or(str::is_empty) {
+            if witness_id.as_str().map_or(true, str::is_empty) {
                 return Err(format!(
                     "research evidence source {index} witness_id must be a non-empty string"
                 ));
@@ -390,7 +390,7 @@ pub fn validate_research_evidence(value: &Value) -> Result<(), String> {
         if claim
             .get("text")
             .and_then(Value::as_str)
-            .is_none_or(|text| text.trim().is_empty())
+            .map_or(true, |text| text.trim().is_empty())
         {
             return Err(format!(
                 "research evidence claim {index} requires non-empty text"
@@ -683,5 +683,87 @@ mod tests {
         let error = validate_witness_dependencies(&value, &store)
             .expect_err("missing durable witness must fail closed");
         assert_eq!(error.code, "WITNESS_NOT_FOUND");
+    }
+}
+
+#[cfg(test)]
+mod l1_boundary_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn evidence() -> Value {
+        json!({
+            "claims": [{"text":"claim", "witness_id":"witness-test", "span":{"start":0,"end":5}}],
+            "sources": [{"locator":"local://source", "source_type":"local"}]
+        })
+    }
+
+    #[test]
+    fn required_evidence_strings_preserve_exact_refusals() {
+        assert!(validate_research_evidence(&evidence()).is_ok());
+        for (array, key, expected) in [
+            (
+                "sources",
+                "source_type",
+                "research evidence source 0 requires a non-empty source_type",
+            ),
+            (
+                "claims",
+                "text",
+                "research evidence claim 0 requires non-empty text",
+            ),
+        ] {
+            for invalid in [
+                None,
+                Some(Value::Null),
+                Some(json!(false)),
+                Some(json!(7)),
+                Some(json!([])),
+                Some(json!({})),
+                Some(json!("")),
+                Some(json!(" \t\n")),
+            ] {
+                let mut value = evidence();
+                let object = value[array][0].as_object_mut().unwrap();
+                match invalid {
+                    Some(invalid) => {
+                        object.insert(key.into(), invalid);
+                    }
+                    None => {
+                        object.remove(key);
+                    }
+                }
+                assert_eq!(
+                    validate_research_evidence(&value).unwrap_err(),
+                    expected,
+                    "{array}.{key}: {value}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn optional_source_witness_id_preserves_absent_and_whitespace_acceptance() {
+        assert!(validate_research_evidence(&evidence()).is_ok());
+        for valid in ["witness-test", " \t\n"] {
+            let mut value = evidence();
+            value["sources"][0]["witness_id"] = json!(valid);
+            assert!(validate_research_evidence(&value).is_ok());
+        }
+        for invalid in [
+            Value::Null,
+            json!(false),
+            json!(7),
+            json!([]),
+            json!({}),
+            json!(""),
+        ] {
+            let mut value = evidence();
+            value["sources"][0]["witness_id"] = invalid;
+            assert_eq!(
+                validate_research_evidence(&value).unwrap_err(),
+                "research evidence source 0 witness_id must be a non-empty string"
+            );
+        }
     }
 }

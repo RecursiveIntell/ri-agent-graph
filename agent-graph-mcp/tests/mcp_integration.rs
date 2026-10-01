@@ -224,12 +224,7 @@ fn approval_tools_require_durable_sqlite_state() {
         let response = mcp.call(tool, arguments);
         // AG-002: approval tools removed from model MCP tool set; now return METHOD_NOT_FOUND
         assert!(
-            response
-                .get("ok")
-                .map(|v| v.as_bool())
-                .flatten()
-                .unwrap_or(true)
-                == false
+            !response.get("ok").and_then(Value::as_bool).unwrap_or(true)
                 || response.get("ok").is_none()
                 || response["ok"].is_null(),
             "{tool} must fail closed"
