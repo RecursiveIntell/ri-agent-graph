@@ -12,7 +12,7 @@
 
 - **25 typed MCP tools** — graph lifecycle, execution (sync + async), state inspection, checkpoint/resume, HITL approvals, source witnesses, templates, policy validation
 - **Daemon + proxy architecture** — single-process daemon with file lock ownership, crash recovery, and startup mode enforcement; stateless proxy that bridges stdin/stdout to Unix socket
-- **Durable persistence** — SQLite-backed with atomic checkpoint transactions, no partial rows after crash
+- **Durable persistence** — SQLite-backed checkpoint transactions and terminal projections; recovery guarantees remain scoped to the fault cases recorded by the audit and current regression tests
 - **Deterministic local checkpoint/resume** — HMAC-SHA256 authenticated checkpoints for linear chains of deterministic `passthrough` and `state_transform` nodes
 - **Built-in templates** — `council_deliberation` (3-analyst parallel), `parallel_council` (debate), `plan_critique_refine`, `analysis_pipeline`, `classifier_router`
 - **Evidence witnessing** — caller-supplied source capture with HMAC-authenticated receipts; locators never fetched, authority never asserted
@@ -46,10 +46,16 @@ cp target/release/agent-graph-mcpd ~/.cargo/bin/
 ### 2. Start the daemon
 
 ```bash
-mkdir -p ~/.local/share/agent-graph
-openssl rand -hex 32 > ~/.local/share/agent-graph/integrity.key
-agent-graph-mcpd --data-dir ~/.local/share/agent-graph --socket /tmp/agent-graph.sock &
+install -d -m 700 "$HOME/.local/share/agent-graph"
+export AGENT_GRAPH_INTEGRITY_KEY_PATH="$HOME/.local/share/agent-graph/integrity.key"
+# Create the key once for a new store; preserve an existing key on restart.
+if [ ! -e "$AGENT_GRAPH_INTEGRITY_KEY_PATH" ]; then
+  (umask 077; openssl rand -hex 32 > "$AGENT_GRAPH_INTEGRITY_KEY_PATH")
+fi
+agent-graph-mcpd --data-dir "$HOME/.local/share/agent-graph" --socket /tmp/agent-graph.sock &
 ```
+
+This workspace daemon accepts `--data-dir` and `--socket`.  Its current source fixes the provider URL to `http://127.0.0.1:11434` and the model to `glm-5.2:cloud`; these are not proxy flags and the model may use a remote Ollama service.  For an explicitly selected model, the deprecated direct path accepts `--direct --base-url ... --model ...`.  The independently maintained [agent-graph-mcp repository](https://github.com/RecursiveIntell/agent-graph-mcp) has a different CLI and source version; inspect the selected binary rather than copying its flags into this workspace daemon.
 
 ### 3. Configure Hermes
 
@@ -58,12 +64,8 @@ mcp_servers:
   agent_graph:
     command: ~/.cargo/bin/agent-graph-mcp
     args:
-      - --base-url
-      - http://127.0.0.1:11434
-      - --model
-      - glm-5.2:cloud
-      - --data-dir
-      - ~/.agent-graph
+      - --socket
+      - /tmp/agent-graph.sock
     enabled: true
 ```
 
@@ -71,7 +73,7 @@ mcp_servers:
 
 ```bash
 # Smoke test — verify no tracing pollution on stdout
-printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}\n{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}\n{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}\n' | timeout 5 agent-graph-mcp --base-url http://127.0.0.1:11434 --model glm-5.2:cloud 2>/dev/null | grep -c '"jsonrpc"'
+printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}\n{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}\n{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}\n' | timeout 5 agent-graph-mcp --socket /tmp/agent-graph.sock 2>/dev/null | grep -c '"jsonrpc"'
 # Expected: 2 (initialize + tools/list response)
 ```
 
@@ -115,7 +117,7 @@ printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion
 | `graph_source_witness_capture` | Persist caller-supplied source content (HMAC-authenticated) |
 | `graph_source_witness_get` | Read witness with authentication tag verification |
 
-### Templates & policy (4 tools)
+### Templates & policy (5 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -125,7 +127,7 @@ printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion
 | `graph_template_outcomes` | Recorded outcome history |
 | `graph_policy_check` | Preflight validation against model/tool/data/budget policy |
 
-### Status & receipts (3 tools)
+### Status & receipts (2 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -241,7 +243,7 @@ agent-graph-mcpd --data-dir PATH --socket PATH
 
 ## Audit closure
 
-All 28 hostile-audit findings (AG-001 through AG-028) are closed.
+The [closure ledger](docs/remediation/hostile-audit-closure-ledger.md) records the disposition of 28 historical findings (AG-001 through AG-028), with named tests and residual scope.  The gate summary below is historical audit evidence, not a fresh pass for the current commit.  Re-run the verification commands against the exact source and environment before making a current closure or release claim.
 
 | Gate | Result |
 |------|--------|
@@ -275,7 +277,7 @@ cargo publish -p agent-graph-mcp --dry-run
 
 ## Claim boundaries
 
-- This MCP server **exposes the agent-graph runtime** over the MCP protocol. It does not include LLM provider clients, prompt templating, or response parsing — those belong in `llm-pipeline` or the application layer
+- This MCP server **exposes the agent-graph runtime** over MCP and wires its bundled LLM nodes through `llm-pipeline::LlmCall`.  Provider payload execution belongs to the `llm-pipeline` dependency; the core graph engine remains separate from provider clients
 - **Receipts prove structural execution** — they carry cryptographic digests of the local execution trace only. They do not prove external model calls occurred or what any provider's internal state was
 - **Resume is deterministic local resume** — it does not support resuming across LLM calls, network I/O, or external tool invocations
 - **Checkpoint integrity** requires `AGENT_GRAPH_INTEGRITY_KEY_PATH` to be configured. Without it, checkpoint/resume, durable approval, terminal receipt, and source-witness operations fail closed
@@ -285,9 +287,9 @@ cargo publish -p agent-graph-mcp --dry-run
 
 | Crate | Description | Version |
 |-------|-------------|---------|
-| [ri-agent-graph](https://crates.io/crates/ri-agent-graph) | Core graph execution engine | v0.2.1 |
-| [agent-graph-mcp](https://crates.io/crates/agent-graph-mcp) | MCP server (this crate) | v0.2.2 |
-| [llm-pipeline](https://crates.io/crates/llm-pipeline) | Reusable LLM node payloads (Ollama, prompt templating, parsing) | v0.2.0 |
+| [ri-agent-graph](https://crates.io/crates/ri-agent-graph) | Core graph execution engine | local 0.2.4 |
+| [agent-graph-mcp](https://crates.io/crates/agent-graph-mcp) | MCP server (this crate) | local 0.2.3 |
+| [llm-pipeline](https://crates.io/crates/llm-pipeline) | Reusable LLM node payloads (Ollama, prompt templating, parsing) | dependency 0.2 |
 | [stack-ids](https://crates.io/crates/stack-ids) | Shared identity, scope, and trace primitives | v0.1.3 |
 
 ## Roadmap
@@ -306,3 +308,4 @@ MIT — see [LICENSE-MIT](LICENSE-MIT) for details.
 ---
 
 Built by [RecursiveIntell](https://github.com/RecursiveIntell) — an applied R&D studio building local-first AI infrastructure.
+
