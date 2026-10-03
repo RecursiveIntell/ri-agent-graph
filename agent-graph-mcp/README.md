@@ -55,7 +55,7 @@ fi
 agent-graph-mcpd --data-dir "$HOME/.local/share/agent-graph" --socket /tmp/agent-graph.sock &
 ```
 
-This workspace daemon accepts `--data-dir` and `--socket`.  Its current source fixes the provider URL to `http://127.0.0.1:11434` and the model to `glm-5.2:cloud`; these are not proxy flags and the model may use a remote Ollama service.  For an explicitly selected model, the deprecated direct path accepts `--direct --base-url ... --model ...`.  The independently maintained [agent-graph-mcp repository](https://github.com/RecursiveIntell/agent-graph-mcp) has a different CLI and source version; inspect the selected binary rather than copying its flags into this workspace daemon.
+This workspace daemon accepts `--data-dir` and `--socket`.  Its current source fixes the provider URL to `http://127.0.0.1:11434` and the default model to `glm-5.2:cloud`; these are not proxy flags and the model may use a remote Ollama service.  Graph node specs can override that default with their `model` field. The deprecated direct path accepts `--direct --base-url ... --model ...` to change its provider URL and default model.  The independently maintained [agent-graph-mcp repository](https://github.com/RecursiveIntell/agent-graph-mcp) has a different CLI and source version; inspect the selected binary rather than copying its flags into this workspace daemon.
 
 ### 3. Configure Hermes
 
