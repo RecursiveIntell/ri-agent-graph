@@ -1,6 +1,7 @@
 use crate::command::NodeOutput;
 use crate::config::GraphConfig;
 use crate::error::Result;
+use crate::executor::NodeExecutionContext;
 use crate::state::AgentState;
 use async_trait::async_trait;
 use std::future::Future;
@@ -12,6 +13,17 @@ use std::pin::Pin;
 pub trait Node: Send + Sync {
     /// Execute this node
     async fn execute(&self, state: &AgentState, config: &GraphConfig) -> Result<NodeOutput>;
+
+    /// Execute with a supplied structural observation. It does not prove parent liveness.
+    /// Legacy nodes retain their existing behavior.
+    async fn execute_with_context(
+        &self,
+        state: &AgentState,
+        config: &GraphConfig,
+        _context: NodeExecutionContext,
+    ) -> Result<NodeOutput> {
+        self.execute(state, config).await
+    }
 
     /// Optional: Get a name for this node (for debugging)
     fn name(&self) -> Option<&str> {

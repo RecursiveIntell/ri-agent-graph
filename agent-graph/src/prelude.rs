@@ -39,7 +39,9 @@ pub use crate::checkpoint_store::{
 pub use crate::checkpointer::{CheckpointSaver, MemorySaver};
 
 // Executor
-pub use crate::executor::{Executor, InProcessExecutor};
+pub use crate::executor::{
+    Executor, InProcessExecutor, NodeExecutionContext, ParentTrialRef, RunLineage,
+};
 
 // Reducers
 pub use crate::reducer::{
@@ -55,8 +57,9 @@ pub use crate::interrupt::{ExecutionResult, InterruptCheckpoint, InterruptConfig
 // Re-export macros
 pub use crate::{node, router};
 
+pub use crate::checkpoint::Checkpoint;
 #[cfg(feature = "checkpointing")]
-pub use crate::checkpoint::{Checkpoint, CheckpointManager};
+pub use crate::checkpoint::CheckpointManager;
 pub use crate::execution_cursor::{ExecutionCursor, InterruptPhase};
 
 #[cfg(feature = "checkpointing")]
