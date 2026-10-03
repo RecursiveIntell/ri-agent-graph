@@ -45,15 +45,48 @@ cp target/release/agent-graph-mcpd ~/.cargo/bin/
 
 ### 2. Start the daemon
 
+Choose the startup path that matches your store.  The daemon records `keyless` or `key-enabled` in SQLite and rejects a mode change with `STARTUP_MODE_MISMATCH`.  Creating a key file alone does not enable it; the daemon must receive `AGENT_GRAPH_INTEGRITY_KEY_PATH`.
+
+#### New keyed store
+
+Use a fresh directory.  This example keeps the older quick start's `$HOME/.local/share/agent-graph` store separate:
+
 ```bash
-install -d -m 700 "$HOME/.local/share/agent-graph"
-export AGENT_GRAPH_INTEGRITY_KEY_PATH="$HOME/.local/share/agent-graph/integrity.key"
-# Create the key once for a new store; preserve an existing key on restart.
-if [ ! -e "$AGENT_GRAPH_INTEGRITY_KEY_PATH" ]; then
-  (umask 077; openssl rand -hex 32 > "$AGENT_GRAPH_INTEGRITY_KEY_PATH")
-fi
-agent-graph-mcpd --data-dir "$HOME/.local/share/agent-graph" --socket /tmp/agent-graph.sock &
+AGENT_GRAPH_DATA_DIR="$HOME/.local/share/agent-graph-keyed"
+(
+  set -e
+  umask 077
+  mkdir -p "$HOME/.local/share"
+  # Refuse an existing path so initialization cannot replace a store or key.
+  mkdir -m 700 "$AGENT_GRAPH_DATA_DIR"
+  export AGENT_GRAPH_INTEGRITY_KEY_PATH="$AGENT_GRAPH_DATA_DIR/integrity.key"
+  openssl rand -hex 32 > "$AGENT_GRAPH_INTEGRITY_KEY_PATH"
+  exec agent-graph-mcpd --data-dir "$AGENT_GRAPH_DATA_DIR" --socket /tmp/agent-graph.sock
+) &
 ```
+
+If that directory already exists, choose another unused directory or use the matching restart instructions below.  Stop any daemon using `/tmp/agent-graph.sock` before starting another, or choose a distinct socket and use it in the proxy configuration too.
+
+#### Existing stores and the older quick start
+
+The older instructions created `integrity.key` without exporting its path.  If the daemon started with no inherited `AGENT_GRAPH_INTEGRITY_KEY_PATH`, it recorded that store as `keyless`, even though the file exists.  To restart that store without changing its mode:
+
+```bash
+env -u AGENT_GRAPH_INTEGRITY_KEY_PATH agent-graph-mcpd \
+  --data-dir "$HOME/.local/share/agent-graph" --socket /tmp/agent-graph.sock &
+```
+
+Keyless operation still rejects integrity-sensitive operations with `INTEGRITY_KEY_REQUIRED`.  The current daemon CLI has no supported in-place keyless-to-keyed conversion.  To begin keyed operation, use a fresh separate data directory as above and retain the old store; this does not migrate its graphs, runs, checkpoints, or receipts.  Do not delete the database or edit its startup-mode record to bypass the rejection.
+
+For a store already initialized keyed, restart with the same data directory and original key.  For the new keyed example above:
+
+```bash
+AGENT_GRAPH_INTEGRITY_KEY_PATH="$HOME/.local/share/agent-graph-keyed/integrity.key" \
+  agent-graph-mcpd --data-dir "$HOME/.local/share/agent-graph-keyed" \
+  --socket /tmp/agent-graph.sock &
+```
+
+Preserve the original key on every restart.  If it is missing, recover it rather than generating a replacement for the existing keyed store.  See [startup mode enforcement](src/daemon.rs) and the [restart regression tests](tests/daemon_recovery.rs).
 
 This workspace daemon accepts `--data-dir` and `--socket`.  Its current source fixes the provider URL to `http://127.0.0.1:11434` and the default model to `glm-5.2:cloud`; these are not proxy flags and the model may use a remote Ollama service.  Graph node specs can override that default with their `model` field. The deprecated direct path accepts `--direct --base-url ... --model ...` to change its provider URL and default model.  The independently maintained [agent-graph-mcp repository](https://github.com/RecursiveIntell/agent-graph-mcp) has a different CLI and source version; inspect the selected binary rather than copying its flags into this workspace daemon.
 
