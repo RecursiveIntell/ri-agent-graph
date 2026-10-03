@@ -69,7 +69,7 @@ If that directory already exists, choose another unused directory or use the mat
 
 #### Existing stores and the older quick start
 
-The older instructions created `integrity.key` without exporting its path.  If the daemon started with no inherited `AGENT_GRAPH_INTEGRITY_KEY_PATH`, it recorded that store as `keyless`, even though the file exists.  To restart that store without changing its mode:
+The instructions before [PR #5](https://github.com/RecursiveIntell/ri-agent-graph/pull/5) created `integrity.key` without exporting its path.  If the daemon started with no inherited `AGENT_GRAPH_INTEGRITY_KEY_PATH`, it recorded that store as `keyless`, even though the file exists.  Only for that keyless store, restart without changing its mode:
 
 ```bash
 env -u AGENT_GRAPH_INTEGRITY_KEY_PATH agent-graph-mcpd \
@@ -77,6 +77,14 @@ env -u AGENT_GRAPH_INTEGRITY_KEY_PATH agent-graph-mcpd \
 ```
 
 Keyless operation still rejects integrity-sensitive operations with `INTEGRITY_KEY_REQUIRED`.  The current daemon CLI has no supported in-place keyless-to-keyed conversion.  To begin keyed operation, use a fresh separate data directory as above and retain the old store; this does not migrate its graphs, runs, checkpoints, or receipts.  Do not delete the database or edit its startup-mode record to bypass the rejection.
+
+The PR #5 quick start exported `AGENT_GRAPH_INTEGRITY_KEY_PATH` before starting the daemon.  A store successfully initialized that way in `$HOME/.local/share/agent-graph` is keyed.  Restart it with its original key and data directory; do not use the keyless command above:
+
+```bash
+AGENT_GRAPH_INTEGRITY_KEY_PATH="$HOME/.local/share/agent-graph/integrity.key" \
+  agent-graph-mcpd --data-dir "$HOME/.local/share/agent-graph" \
+  --socket /tmp/agent-graph.sock &
+```
 
 For a store already initialized keyed, restart with the same data directory and original key.  For the new keyed example above:
 
