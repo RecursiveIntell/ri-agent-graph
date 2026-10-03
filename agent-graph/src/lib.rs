@@ -57,7 +57,6 @@ pub mod router;
 pub mod state;
 pub mod stream;
 
-#[cfg(feature = "checkpointing")]
 pub mod checkpoint;
 
 pub use error::{AgentGraphError, CheckpointStoreOperation, Result};
