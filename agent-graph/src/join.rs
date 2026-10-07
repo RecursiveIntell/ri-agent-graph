@@ -284,6 +284,25 @@ fn claim_of(value: &Value, claim_path: &str) -> Option<String> {
     }
 }
 
+fn identity_of<'a>(
+    key: &'a str,
+    value: &'a Value,
+    identity_path: Option<&str>,
+) -> Result<&'a str, String> {
+    let Some(path) = identity_path else {
+        return Ok(key);
+    };
+    match path_get(value, path) {
+        None => Err(format!(
+            "dedupe_by_identity: artifact '{key}' is missing identity path '{path}'"
+        )),
+        Some(Value::String(identity)) if !identity.trim().is_empty() => Ok(identity),
+        Some(_) => Err(format!(
+            "dedupe_by_identity: artifact '{key}' identity path '{path}' must be a non-empty string"
+        )),
+    }
+}
+
 impl JoinStrategy for DedupeByIdentity {
     fn name(&self) -> &'static str {
         "dedupe_by_identity"
@@ -293,14 +312,8 @@ impl JoinStrategy for DedupeByIdentity {
         if inputs.is_empty() {
             return Err("dedupe_by_identity requires at least one branch artifact".into());
         }
-        if let Some(path) = &self.identity_path {
-            for (key, value) in inputs {
-                if path_get(value, path).is_none() {
-                    return Err(format!(
-                        "dedupe_by_identity: artifact '{key}' is missing identity path '{path}'"
-                    ));
-                }
-            }
+        for (key, value) in inputs {
+            identity_of(key, value, self.identity_path.as_deref())?;
         }
         Ok(())
     }
@@ -309,13 +322,7 @@ impl JoinStrategy for DedupeByIdentity {
         let mut seen = std::collections::BTreeSet::new();
         let mut out = Vec::new();
         for (key, value) in inputs {
-            let identity = self
-                .identity_path
-                .as_deref()
-                .and_then(|path| path_get(&value, path))
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .unwrap_or_else(|| key.clone());
+            let identity = identity_of(&key, &value, self.identity_path.as_deref())?.to_owned();
             if seen.insert(identity) {
                 out.push((key, value));
             }
@@ -494,9 +501,15 @@ impl JoinStrategy for MinorityReport {
 }
 
 fn evidence_valid(value: &Value) -> Result<(), String> {
-    let Some(entries) = value.get("evidence").and_then(Value::as_array) else {
+    let Some(evidence) = value.get("evidence") else {
         return Ok(()); // field presence is enforced via required_fields
     };
+    let Some(entries) = evidence.as_array() else {
+        return Err("evidence must be an array".into());
+    };
+    if entries.is_empty() {
+        return Err("evidence must not be empty".into());
+    }
     for entry in entries {
         let witness_id = entry.get("witness_id").and_then(Value::as_str);
         let digest = entry.get("digest").and_then(Value::as_str);
@@ -509,8 +522,11 @@ fn evidence_valid(value: &Value) -> Result<(), String> {
 }
 
 fn checks_valid(value: &Value) -> Result<(), String> {
-    let Some(entries) = value.get("checks").and_then(Value::as_array) else {
+    let Some(checks) = value.get("checks") else {
         return Ok(()); // field presence is enforced via required_fields
+    };
+    let Some(entries) = checks.as_array() else {
+        return Err("checks must be an array".into());
     };
     if entries.is_empty() {
         return Err("checks must not be empty".into());
@@ -814,5 +830,97 @@ mod tests {
             .notes
             .iter()
             .any(|n| n.contains("missing required field 'receipt'")));
+    }
+
+    #[test]
+    fn dedupe_rejects_malformed_configured_identity_without_fallback() {
+        let strategy = DedupeByIdentity {
+            identity_path: Some("claim.id".into()),
+        };
+        for identity in [
+            Value::Null,
+            json!(true),
+            json!(1),
+            json!([]),
+            json!({}),
+            json!(""),
+            json!(" \n\t"),
+        ] {
+            let inputs = vec![artifact("branch_a", json!({"claim": {"id": identity}}))];
+            assert!(strategy.validate_inputs(&inputs).is_err());
+            assert!(strategy.normalize(inputs).is_err());
+        }
+        let missing = vec![artifact("branch_a", json!({"claim": {}}))];
+        assert!(strategy.validate_inputs(&missing).is_err());
+        assert!(strategy.normalize(missing).is_err());
+    }
+
+    #[test]
+    fn dedupe_without_identity_path_preserves_distinct_branch_keys() {
+        let strategy = DedupeByIdentity {
+            identity_path: None,
+        };
+        let inputs = vec![
+            artifact("a", json!({"claim": {"id": null}})),
+            artifact("b", json!({"claim": {"id": null}})),
+            artifact("a", json!({"claim": {"id": "ignored"}})),
+        ];
+        strategy.validate_inputs(&inputs).unwrap();
+        let set = strategy.normalize(inputs).unwrap();
+        assert_eq!(set.len(), 2);
+        assert_eq!(set[0].0, "a");
+        assert_eq!(set[1].0, "b");
+        assert_eq!(set[0].1["claim"]["id"], Value::Null);
+    }
+
+    #[test]
+    fn proof_carrying_join_quarantines_malformed_present_fields() {
+        let strategy = ProofCarryingJoin::default();
+        for field in ["evidence", "checks"] {
+            for malformed in [
+                Value::Null,
+                json!(false),
+                json!(1),
+                json!("passed"),
+                json!({}),
+                json!([]),
+            ] {
+                let mut value = json!({
+                    "evidence": [{"witness_id": "w1", "digest": "sha256:abc"}],
+                    "checks": [{"status": "passed"}],
+                    "receipt": "receipt:r1",
+                });
+                value[field] = malformed;
+                let outcome = strategy
+                    .adjudicate(vec![artifact("bad", value)], &[])
+                    .unwrap();
+                assert_eq!(
+                    outcome.certification,
+                    JoinCertification::Quarantine,
+                    "{field}"
+                );
+                assert!(outcome.value.as_array().unwrap().is_empty());
+                assert!(outcome.notes.iter().any(|note| note.contains(field)));
+            }
+        }
+    }
+
+    #[test]
+    fn proof_carrying_join_custom_fields_allow_omission_but_reject_malformed_presence() {
+        let strategy = ProofCarryingJoin {
+            required_fields: vec!["receipt".into()],
+        };
+        let omitted = strategy
+            .adjudicate(vec![artifact("a", json!({"receipt": "receipt:r1"}))], &[])
+            .unwrap();
+        assert_eq!(omitted.certification, JoinCertification::Pass);
+        for field in ["evidence", "checks"] {
+            let mut value = json!({"receipt": "receipt:r1"});
+            value[field] = Value::Null;
+            let outcome = strategy
+                .adjudicate(vec![artifact("a", value)], &[])
+                .unwrap();
+            assert_eq!(outcome.certification, JoinCertification::Quarantine);
+        }
     }
 }
