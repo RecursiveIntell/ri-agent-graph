@@ -112,3 +112,20 @@ A source or test count is not a stable API contract; use the test output for the
 ## License
 
 The package declares MIT. See [the workspace license](../LICENSE-MIT).
+
+### Direct execution-trial observations (unreleased source API)
+
+`Executor::execute_node_with_context` receives an immutable
+`NodeExecutionContext` directly from the engine: graph run, node, stable retry
+family, fresh trial and zero-based retry ordinal. The default calls the existing
+`execute_node`, preserving legacy executors without making them context-aware.
+An authority-bearing adapter must override the context method and reject its
+legacy entrypoint. Neither method grants permission by itself.
+
+This is a partial correlation prerequisite, not native/Ares integration or a
+receipt. Nested graphs have their own run identity; causal parent-trial lineage
+is not supplied yet. Cancellation and sibling abort may leave interrupted,
+unjoined event observations. Event delivery is lossy, and retained context
+cannot establish durable completion, physical nonexecution or permission to
+retry an uncertain effect. The full governed lineage/admission gate remains
+open. This API is not present in the published 0.2.4 artifact.
