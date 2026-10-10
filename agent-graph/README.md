@@ -112,3 +112,47 @@ A source or test count is not a stable API contract; use the test output for the
 ## License
 
 The package declares MIT. See [the workspace license](../LICENSE-MIT).
+
+### Direct execution-trial observations (unreleased source API)
+
+`Executor::execute_node_with_context` receives an immutable
+`NodeExecutionContext` directly from the engine: graph run, node, stable retry
+family, fresh trial and zero-based retry ordinal. The default calls the existing
+`execute_node`, preserving legacy executors without making them context-aware.
+An authority-bearing adapter must override the context method and reject its
+legacy entrypoint. Neither method grants permission by itself.
+
+This is a partial correlation prerequisite, not native/Ares integration or a
+receipt. Nested graphs have their own run identity; causal parent-trial lineage
+is not supplied yet. Cancellation and sibling abort may leave interrupted,
+unjoined event observations. Event delivery is lossy, and retained context
+cannot establish durable completion, physical nonexecution or permission to
+retry an uncertain effect. The full governed lineage/admission gate remains
+open. This API is not present in the published 0.2.4 artifact.
+
+### Checkpoint storage features
+
+The `Checkpoint` data record, in-memory checkpoint APIs and ordinary graph/
+interrupt execution are available with `default-features = false`. The default
+`checkpointing` feature enables the optional SQLite dependency,
+`CheckpointManager` and `SqliteSaver`. Enabling the feature makes those APIs
+available; it does not attach or activate a store automatically. In-memory data
+support is not durable recovery or authority. Existing serialized checkpoint
+fields and SQLite behavior are unchanged.
+
+### Structural subgraph lineage (unreleased)
+
+The additive `Node::execute_with_context` path carries engine-issued trial observations
+through direct execution, `InProcessExecutor`, and explicitly forwarding executors.
+`RunLineage` distinguishes public root execution, linked subgraphs, and legacy unlinked
+subgraphs. `ParentTrialRef` identifies only the immediate supplied parent trial;
+unknown roots stay unknown through descendants. Legacy executor scheduling remains
+unchanged and does not automatically qualify for lineage.
+
+Contexts are cloneable observations. Calling the public node method with an old or
+cross-node context can reproduce that supplied structural link; it proves neither
+parent liveness nor permission. Native consumers must independently match their
+expected live parent and authority before effects. Events, persistence and receipt
+schemas are unchanged. A nested graph still has its own cooperative cancellation
+flag; parent cancellation does not automatically interrupt an awaited child. This
+API adds neither durable resumption nor physical-work admission.
