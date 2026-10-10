@@ -55,8 +55,9 @@ pub use crate::interrupt::{ExecutionResult, InterruptCheckpoint, InterruptConfig
 // Re-export macros
 pub use crate::{node, router};
 
+pub use crate::checkpoint::Checkpoint;
 #[cfg(feature = "checkpointing")]
-pub use crate::checkpoint::{Checkpoint, CheckpointManager};
+pub use crate::checkpoint::CheckpointManager;
 pub use crate::execution_cursor::{ExecutionCursor, InterruptPhase};
 
 #[cfg(feature = "checkpointing")]
