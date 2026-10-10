@@ -38,6 +38,7 @@ impl OwnerLock {
         let path = data_dir.join(".owner.lock");
         let file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .mode(0o600)
@@ -108,5 +109,33 @@ mod tests {
             "lock file should have 0600 permissions, got 0o{:o}",
             mode
         );
+    }
+}
+
+#[cfg(test)]
+mod l1_boundary_tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+
+    #[test]
+    fn owner_lock_preserves_preseeded_content_and_inode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".owner.lock");
+        let sentinel = b"existing owner metadata\n";
+        std::fs::write(&path, sentinel).unwrap();
+        let before = std::fs::metadata(&path).unwrap();
+        let first = OwnerLock::acquire(dir.path()).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), sentinel);
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), before.ino());
+        let error = OwnerLock::acquire(dir.path()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(error.to_string(), DATA_DIR_ALREADY_OWNED);
+        assert_eq!(std::fs::read(&path).unwrap(), sentinel);
+        let after = std::fs::metadata(&path).unwrap();
+        assert_eq!((after.dev(), after.ino()), (before.dev(), before.ino()));
+        drop(first);
+        let _reacquired = OwnerLock::acquire(dir.path()).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), sentinel);
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), before.ino());
     }
 }
