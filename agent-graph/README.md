@@ -112,3 +112,13 @@ A source or test count is not a stable API contract; use the test output for the
 ## License
 
 The package declares MIT. See [the workspace license](../LICENSE-MIT).
+
+### Checkpoint storage features
+
+The `Checkpoint` data record, in-memory checkpoint APIs and ordinary graph/
+interrupt execution are available with `default-features = false`. The default
+`checkpointing` feature enables the optional SQLite dependency,
+`CheckpointManager` and `SqliteSaver`. Enabling the feature makes those APIs
+available; it does not attach or activate a store automatically. In-memory data
+support is not durable recovery or authority. Existing serialized checkpoint
+fields and SQLite behavior are unchanged.

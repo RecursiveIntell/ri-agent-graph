@@ -1,6 +1,8 @@
+#[cfg(feature = "checkpointing")]
 use crate::error::Result;
 use crate::state::StateSnapshot;
 use chrono::{DateTime, Utc};
+#[cfg(feature = "checkpointing")]
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
@@ -17,10 +19,12 @@ pub struct Checkpoint {
     pub active_nodes: Vec<String>,
 }
 
+#[cfg(feature = "checkpointing")]
 pub struct CheckpointManager {
     conn: Connection,
 }
 
+#[cfg(feature = "checkpointing")]
 impl CheckpointManager {
     /// Create a new checkpoint manager
     pub fn new(db_path: &str) -> Result<Self> {
