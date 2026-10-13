@@ -368,13 +368,7 @@ fn validate_state_write_conflicts(spec: &GraphSpec) -> Result<(), String> {
             NodeType::Llm | NodeType::HumanApproval | NodeType::Subgraph => {
                 if let Some(key) = node
                     .config
-                    .get(if node.node_type == NodeType::Llm {
-                        "output_key"
-                    } else if node.node_type == NodeType::HumanApproval {
-                        "output_key"
-                    } else {
-                        "output_key"
-                    })
+                    .get("output_key")
                     .and_then(Value::as_str)
                     .filter(|key| !key.is_empty())
                 {
@@ -652,15 +646,14 @@ fn validate_node(node: &NodeSpec, ids: &BTreeSet<&str>) -> Result<(), String> {
             }
         }
     }
-    if node.node_type == NodeType::Subgraph {
-        if node
+    if node.node_type == NodeType::Subgraph
+        && node
             .config
             .get("graph_name")
             .and_then(Value::as_str)
             .is_none()
-        {
-            return Err(format!("subgraph '{}' requires config.graph_name", node.id));
-        }
+    {
+        return Err(format!("subgraph '{}' requires config.graph_name", node.id));
     }
     if node.node_type == NodeType::HumanApproval {
         if node
@@ -806,6 +799,117 @@ mod tests {
                 parse_and_validate(&spec).is_ok(),
                 "swarm join mode '{mode}' rejected"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod l1_boundary_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn all_output_key_node_types_require_reducers_for_parallel_collisions() {
+        for (kind, config) in [
+            ("llm", json!({"output_key":"shared"})),
+            (
+                "human_approval",
+                json!({"output_key":"shared", "prompt_key":"prompt", "audience":[]}),
+            ),
+            (
+                "subgraph",
+                json!({"output_key":"shared", "graph_name":"child"}),
+            ),
+        ] {
+            let mut graph = json!({
+                "name":"output-conflict", "entry":"fork", "reducers":{},
+                "nodes":[
+                    {"id":"fork", "type":"passthrough"},
+                    {"id":"left", "type":kind, "config":config},
+                    {"id":"right", "type":kind, "config":config}
+                ],
+                "edges":[{"from":"fork", "to":"left"}, {"from":"fork", "to":"right"}, {"from":"left", "to":"END"}, {"from":"right", "to":"END"}]
+            });
+            assert_eq!(parse_and_validate(&graph).unwrap_err(), "state key 'shared' is written by unordered parallel nodes 'left' and 'right'; declare reducers.", "{kind}");
+            graph["reducers"] = json!({"shared":"append"});
+            assert!(parse_and_validate(&graph).is_ok(), "{kind}");
+            graph["reducers"] = json!({});
+            graph["edges"] = json!([
+                {"from":"fork", "to":"left"},
+                {"from":"left", "to":"right"},
+                {"from":"right", "to":"END"}
+            ]);
+            assert!(parse_and_validate(&graph).is_ok(), "ordered {kind} writers");
+        }
+    }
+
+    #[test]
+    fn output_key_non_strings_and_empty_values_preserve_no_writer_behavior() {
+        for (kind, config) in [
+            ("llm", json!({})),
+            (
+                "human_approval",
+                json!({"prompt_key":"prompt", "audience":[]}),
+            ),
+            ("subgraph", json!({"graph_name":"child"})),
+        ] {
+            for key in [
+                None,
+                Some(Value::Null),
+                Some(json!(false)),
+                Some(json!(7)),
+                Some(json!([])),
+                Some(json!({})),
+                Some(json!("")),
+            ] {
+                let mut config = config.clone();
+                if let Some(key) = key {
+                    config["output_key"] = key;
+                }
+                let graph = json!({
+                    "name":"non-writers", "entry":"fork", "reducers":{},
+                    "nodes":[
+                        {"id":"fork", "type":"passthrough"},
+                        {"id":"left", "type":kind, "config":config},
+                        {"id":"right", "type":kind, "config":config}
+                    ],
+                    "edges":[{"from":"fork", "to":"left"}, {"from":"fork", "to":"right"}, {"from":"left", "to":"END"}, {"from":"right", "to":"END"}]
+                });
+                assert!(parse_and_validate(&graph).is_ok(), "{kind}: {config}");
+            }
+        }
+    }
+
+    #[test]
+    fn subgraph_name_guard_preserves_string_type_boundary() {
+        for graph_name in [
+            None,
+            Some(Value::Null),
+            Some(json!(false)),
+            Some(json!(7)),
+            Some(json!([])),
+            Some(json!({})),
+            Some(json!("")),
+            Some(json!("child")),
+        ] {
+            let mut graph = json!({
+                "name":"subgraph-name", "entry":"child",
+                "nodes":[{"id":"child", "type":"subgraph", "config":{}}],
+                "edges":[{"from":"child", "to":"END"}]
+            });
+            let accepted = graph_name.as_ref().is_some_and(Value::is_string);
+            if let Some(graph_name) = graph_name {
+                graph["nodes"][0]["config"]["graph_name"] = graph_name;
+            }
+            let result = parse_and_validate(&graph);
+            if accepted {
+                assert!(result.is_ok());
+            } else {
+                assert_eq!(
+                    result.unwrap_err(),
+                    "subgraph 'child' requires config.graph_name"
+                );
+            }
         }
     }
 }
