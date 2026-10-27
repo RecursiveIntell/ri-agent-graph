@@ -1,5 +1,8 @@
 # ri-agent-graph
 
+<!-- last-verified: 2026-10-26 -->
+<!-- verification-scope: MCP quick-start deprecation wording and its local link only -->
+
 **Run 9 agents at once.** Graph-based agent orchestration for Rust — a LangGraph-inspired execution engine with parallel fan-out (up to 16 nodes), fan-in joins, checkpointing, interrupt/resume, cryptographic receipts, and an MCP server exposing 25 typed tools.
 
 [![Crates.io — engine](https://img.shields.io/crates/v/ri-agent-graph?label=ri-agent-graph)](https://crates.io/crates/ri-agent-graph)
@@ -41,9 +44,7 @@ let result = graph.execute(START, AgentState::new()).await?;
 
 ### MCP server
 
-```bash
-npx -y @recursiveintell/agent-graph-mcp --direct --base-url http://127.0.0.1:11434 --model llama3.2:3b
-```
+The `--direct` mode is deprecated. For the daemon-and-proxy quick start, see the [MCP server README](./agent-graph-mcp/README.md#quick-start).
 
 ## Architecture
 
