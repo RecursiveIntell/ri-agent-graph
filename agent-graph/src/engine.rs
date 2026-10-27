@@ -7,6 +7,7 @@ use crate::config::GraphConfig;
 use crate::edge::EdgeType;
 use crate::error::{AgentGraphError, CheckpointStoreOperation, Result};
 use crate::event_sink::{EventSink, GraphEvent, NodeOutcomeKind};
+use crate::executor::{NodeExecutionContext, RunLineage};
 use crate::graph::{AgentGraph, END, START};
 use crate::interrupt::{ExecutionResult, InterruptCheckpoint};
 use crate::retry::RetryPolicy;
@@ -65,6 +66,33 @@ impl AgentGraph {
         state: AgentState,
         config: GraphConfig,
     ) -> (Result<AgentState>, RunSummary) {
+        self.execute_with_summary_origin(start_node, state, config, RunLineage::Root)
+            .await
+    }
+
+    pub(crate) async fn execute_subgraph_origin(
+        &self,
+        start_node: &str,
+        state: AgentState,
+        config: GraphConfig,
+        parent: Option<NodeExecutionContext>,
+    ) -> Result<AgentState> {
+        let lineage = match parent {
+            Some(context) => RunLineage::LinkedSubgraph(context.parent_ref()),
+            None => RunLineage::UnlinkedSubgraph,
+        };
+        self.execute_with_summary_origin(start_node, state, config, lineage)
+            .await
+            .0
+    }
+
+    async fn execute_with_summary_origin(
+        &self,
+        start_node: &str,
+        state: AgentState,
+        config: GraphConfig,
+        lineage: RunLineage,
+    ) -> (Result<AgentState>, RunSummary) {
         self.register_reducers_on_state(&state).await;
         let trace_ctx = config.resolve_trace_ctx();
         let run_id = match self.create_run_id().await {
@@ -74,20 +102,18 @@ impl AgentGraph {
         let event_sink = self.resolve_event_sink(None);
         let cancel = Arc::new(AtomicBool::new(false));
 
-        let executor = GraphExecutor {
-            graph: self,
+        let executor = GraphExecutor::new(
+            self,
             state,
             config,
-            iteration: 0,
-            event_sink,
-            run_id,
-            trace_ctx,
-            cancel_flag: cancel,
-            started_at: chrono::Utc::now(),
-            total_attempts: 0,
-            failed_attempts: 0,
-            executed_nodes: HashSet::new(),
-        };
+            RunExecutionInputs {
+                event_sink,
+                run_id,
+                trace_ctx,
+                cancel_flag: cancel,
+                lineage,
+            },
+        );
 
         executor.execute(start_node).await
     }
@@ -125,20 +151,18 @@ impl AgentGraph {
         let event_sink = self.resolve_event_sink(None);
         let cancel = Arc::new(AtomicBool::new(false));
 
-        let executor = GraphExecutor {
-            graph: self,
+        let executor = GraphExecutor::new(
+            self,
             state,
             config,
-            iteration: 0,
-            event_sink,
-            run_id,
-            trace_ctx,
-            cancel_flag: cancel,
-            started_at: chrono::Utc::now(),
-            total_attempts: 0,
-            failed_attempts: 0,
-            executed_nodes: HashSet::new(),
-        };
+            RunExecutionInputs {
+                event_sink,
+                run_id,
+                trace_ctx,
+                cancel_flag: cancel,
+                lineage: RunLineage::Root,
+            },
+        );
 
         let (result, _summary) = executor.execute(start_node).await;
         match result {
@@ -186,20 +210,18 @@ impl AgentGraph {
             let run_id = graph.create_run_id().await?;
             let event_sink = graph.resolve_event_sink(None);
 
-            let executor = GraphExecutor {
-                graph: &graph,
+            let executor = GraphExecutor::new(
+                &graph,
                 state,
                 config,
-                iteration: 0,
-                event_sink,
-                run_id,
-                trace_ctx,
-                cancel_flag: cancel_clone,
-                started_at: chrono::Utc::now(),
-                total_attempts: 0,
-                failed_attempts: 0,
-                executed_nodes: HashSet::new(),
-            };
+                RunExecutionInputs {
+                    event_sink,
+                    run_id,
+                    trace_ctx,
+                    cancel_flag: cancel_clone,
+                    lineage: RunLineage::Root,
+                },
+            );
 
             let (result, _summary) = executor.execute(&start).await;
             result
@@ -230,20 +252,18 @@ impl AgentGraph {
             let event_sink = graph.resolve_event_sink(Some(tx));
             let cancel = Arc::new(AtomicBool::new(false));
 
-            let executor = GraphExecutor {
-                graph: &graph,
+            let executor = GraphExecutor::new(
+                &graph,
                 state,
                 config,
-                iteration: 0,
-                event_sink,
-                run_id,
-                trace_ctx,
-                cancel_flag: cancel,
-                started_at: chrono::Utc::now(),
-                total_attempts: 0,
-                failed_attempts: 0,
-                executed_nodes: HashSet::new(),
-            };
+                RunExecutionInputs {
+                    event_sink,
+                    run_id,
+                    trace_ctx,
+                    cancel_flag: cancel,
+                    lineage: RunLineage::Root,
+                },
+            );
 
             let (result, _summary) = executor.execute(&start).await;
             result
@@ -253,9 +273,18 @@ impl AgentGraph {
     }
 }
 
+struct RunExecutionInputs {
+    event_sink: Arc<dyn EventSink>,
+    run_id: String,
+    trace_ctx: stack_ids::TraceCtx,
+    cancel_flag: Arc<AtomicBool>,
+    lineage: RunLineage,
+}
+
 /// Internal executor that runs the graph using superstep-based execution.
 struct GraphExecutor<'a> {
     graph: &'a AgentGraph,
+    lineage: RunLineage,
     state: AgentState,
     config: GraphConfig,
     iteration: usize,
@@ -273,6 +302,29 @@ struct GraphExecutor<'a> {
 }
 
 impl<'a> GraphExecutor<'a> {
+    fn new(
+        graph: &'a AgentGraph,
+        state: AgentState,
+        config: GraphConfig,
+        inputs: RunExecutionInputs,
+    ) -> Self {
+        Self {
+            graph,
+            state,
+            config,
+            iteration: 0,
+            event_sink: inputs.event_sink,
+            run_id: inputs.run_id,
+            trace_ctx: inputs.trace_ctx,
+            cancel_flag: inputs.cancel_flag,
+            lineage: inputs.lineage,
+            started_at: chrono::Utc::now(),
+            total_attempts: 0,
+            failed_attempts: 0,
+            executed_nodes: HashSet::new(),
+        }
+    }
+
     /// Derive the legacy trace_id string from the canonical TraceCtx.
     fn legacy_trace_id(&self) -> String {
         self.trace_ctx.to_legacy_trace_id().to_string()
@@ -664,12 +716,16 @@ impl<'a> GraphExecutor<'a> {
             let state = self.state.clone();
             let config = self.config.clone();
             execute_node_attempt_family(
-                move || {
+                move |context| {
                     let executor = executor.clone();
                     let node = node.clone();
                     let state = state.clone();
                     let config = config.clone();
-                    async move { executor.execute_node(node, state, config).await }
+                    async move {
+                        executor
+                            .execute_node_with_context(node, state, config, context)
+                            .await
+                    }
                 },
                 retry,
                 self.cancel_flag.clone(),
@@ -677,6 +733,7 @@ impl<'a> GraphExecutor<'a> {
                 self.event_sink.clone(),
                 self.graph.checkpoint_store.clone(),
                 self.run_id.clone(),
+                self.lineage.clone(),
                 node_name.clone(),
                 legacy_tid.clone(),
                 trace_ctx.clone(),
@@ -688,11 +745,11 @@ impl<'a> GraphExecutor<'a> {
             let state = self.state.clone();
             let config = self.config.clone();
             execute_node_attempt_family(
-                move || {
+                move |context| {
                     let node = node.clone();
                     let state = state.clone();
                     let config = config.clone();
-                    async move { node.execute(&state, &config).await }
+                    async move { node.execute_with_context(&state, &config, context).await }
                 },
                 retry,
                 self.cancel_flag.clone(),
@@ -700,6 +757,7 @@ impl<'a> GraphExecutor<'a> {
                 self.event_sink.clone(),
                 self.graph.checkpoint_store.clone(),
                 self.run_id.clone(),
+                self.lineage.clone(),
                 node_name.clone(),
                 legacy_tid.clone(),
                 trace_ctx.clone(),
@@ -852,6 +910,7 @@ impl<'a> GraphExecutor<'a> {
         let retry_policy = self.graph.retry_policies.get(node_name).cloned();
         let event_sink = self.event_sink.clone();
         let run_id = self.run_id.clone();
+        let lineage = self.lineage.clone();
         let trace_id = self.legacy_trace_id();
         let trace_ctx = Some(self.trace_ctx.clone());
         let checkpoint_store = self.graph.checkpoint_store.clone();
@@ -867,12 +926,15 @@ impl<'a> GraphExecutor<'a> {
                 let before = forked_state.export().await;
                 let execution_state = forked_state.clone();
                 let outcome = execute_node_attempt_family(
-                    move || {
+                    move |context| {
                         let exec = exec.clone();
                         let node = node.clone();
                         let forked_state = execution_state.clone();
                         let config = config.clone();
-                        async move { exec.execute_node(node, forked_state, config).await }
+                        async move {
+                            exec.execute_node_with_context(node, forked_state, config, context)
+                                .await
+                        }
                     },
                     retry_policy,
                     cancel_flag.clone(),
@@ -880,6 +942,7 @@ impl<'a> GraphExecutor<'a> {
                     event_sink.clone(),
                     checkpoint_store.clone(),
                     run_id.clone(),
+                    lineage.clone(),
                     name.clone(),
                     trace_id.clone(),
                     trace_ctx.clone(),
@@ -947,11 +1010,14 @@ impl<'a> GraphExecutor<'a> {
                 let before = forked_state.export().await;
                 let execution_state = forked_state.clone();
                 let outcome = execute_node_attempt_family(
-                    move || {
+                    move |context| {
                         let node = node.clone();
                         let forked_state = execution_state.clone();
                         let config = config.clone();
-                        async move { node.execute(&forked_state, &config).await }
+                        async move {
+                            node.execute_with_context(&forked_state, &config, context)
+                                .await
+                        }
                     },
                     retry_policy,
                     cancel_flag.clone(),
@@ -959,6 +1025,7 @@ impl<'a> GraphExecutor<'a> {
                     event_sink.clone(),
                     checkpoint_store.clone(),
                     run_id.clone(),
+                    lineage.clone(),
                     name.clone(),
                     trace_id.clone(),
                     trace_ctx.clone(),
@@ -1067,6 +1134,7 @@ async fn execute_node_attempt_family<ExecOnce, ExecFut>(
     event_sink: Arc<dyn EventSink>,
     checkpoint_store: Option<Arc<dyn CheckpointStore>>,
     run_id: String,
+    lineage: RunLineage,
     node_id: String,
     legacy_trace_id: String,
     trace_ctx: Option<stack_ids::TraceCtx>,
@@ -1074,7 +1142,7 @@ async fn execute_node_attempt_family<ExecOnce, ExecFut>(
     canonical_attempt_id: stack_ids::AttemptId,
 ) -> std::result::Result<AttemptFamilySuccess, AttemptFamilyFailure>
 where
-    ExecOnce: FnMut() -> ExecFut,
+    ExecOnce: FnMut(NodeExecutionContext) -> ExecFut,
     ExecFut: Future<Output = Result<NodeOutput>>,
 {
     let max_attempts = retry
@@ -1122,7 +1190,15 @@ where
             None
         };
 
-        match exec_once().await {
+        let context = NodeExecutionContext::new(
+            run_id.clone(),
+            node_id.clone(),
+            canonical_attempt_id.clone(),
+            trial_id.clone(),
+            attempt_index,
+            lineage.clone(),
+        );
+        match exec_once(context).await {
             Ok(output) => {
                 if let NodeOutput::Command(ref cmd) = output {
                     if let Some(ref updates) = cmd.update {

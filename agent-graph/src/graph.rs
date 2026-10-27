@@ -1,4 +1,5 @@
 #![allow(deprecated)] // Constructs GraphEvent with legacy trace_id/attempt fields during migration
+use crate::executor::NodeExecutionContext;
 
 use crate::checkpoint::Checkpoint;
 use crate::checkpoint_store::CheckpointStore;
@@ -264,10 +265,13 @@ impl AgentGraph {
     }
 }
 
-// Implement Node for AgentGraph to enable subgraph support.
-#[async_trait::async_trait]
-impl Node for AgentGraph {
-    async fn execute(&self, state: &AgentState, config: &GraphConfig) -> Result<NodeOutput> {
+impl AgentGraph {
+    async fn execute_subgraph_node(
+        &self,
+        state: &AgentState,
+        config: &GraphConfig,
+        parent: Option<NodeExecutionContext>,
+    ) -> Result<NodeOutput> {
         let subgraph_state = state.fork().await;
 
         let start = if self.edges.contains_key(START) {
@@ -294,7 +298,7 @@ impl Node for AgentGraph {
         };
 
         let result = self
-            .execute_with_config(start, subgraph_state, config.clone())
+            .execute_subgraph_origin(start, subgraph_state, config.clone(), parent)
             .await?;
 
         let result_data = result.export().await;
@@ -304,7 +308,22 @@ impl Node for AgentGraph {
 
         Ok(NodeOutput::Done)
     }
+}
 
+#[async_trait::async_trait]
+impl Node for AgentGraph {
+    async fn execute(&self, state: &AgentState, config: &GraphConfig) -> Result<NodeOutput> {
+        self.execute_subgraph_node(state, config, None).await
+    }
+    async fn execute_with_context(
+        &self,
+        state: &AgentState,
+        config: &GraphConfig,
+        context: NodeExecutionContext,
+    ) -> Result<NodeOutput> {
+        self.execute_subgraph_node(state, config, Some(context))
+            .await
+    }
     fn name(&self) -> Option<&str> {
         self.graph_name.as_deref()
     }
