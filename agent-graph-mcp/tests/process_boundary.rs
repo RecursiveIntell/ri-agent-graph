@@ -1,9 +1,4 @@
-#[path = "../src/daemon.rs"]
-mod daemon;
-#[path = "../src/lifecycle.rs"]
-mod lifecycle;
-#[path = "../src/migrations.rs"]
-mod migrations;
+use agent_graph_mcp::{daemon, lifecycle};
 #[test]
 fn second_daemon_fails_before_opening_database() {
     let d = tempfile::tempdir().unwrap();

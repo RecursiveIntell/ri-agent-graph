@@ -12,7 +12,7 @@
 
 - **25 typed MCP tools** — graph lifecycle, execution (sync + async), state inspection, checkpoint/resume, HITL approvals, source witnesses, templates, policy validation
 - **Daemon + proxy architecture** — single-process daemon with file lock ownership, crash recovery, and startup mode enforcement; stateless proxy that bridges stdin/stdout to Unix socket
-- **Durable persistence** — SQLite-backed with atomic checkpoint transactions, no partial rows after crash
+- **Durable persistence** — SQLite-backed checkpoint transactions and terminal projections; recovery guarantees remain scoped to the fault cases recorded by the audit and current regression tests
 - **Deterministic local checkpoint/resume** — HMAC-SHA256 authenticated checkpoints for linear chains of deterministic `passthrough` and `state_transform` nodes
 - **Built-in templates** — `council_deliberation` (3-analyst parallel), `parallel_council` (debate), `plan_critique_refine`, `analysis_pipeline`, `classifier_router`
 - **Evidence witnessing** — caller-supplied source capture with HMAC-authenticated receipts; locators never fetched, authority never asserted
@@ -45,11 +45,58 @@ cp target/release/agent-graph-mcpd ~/.cargo/bin/
 
 ### 2. Start the daemon
 
+Choose the startup path that matches your store.  The daemon records `keyless` or `key-enabled` in SQLite and rejects a mode change with `STARTUP_MODE_MISMATCH`.  Creating a key file alone does not enable it; the daemon must receive `AGENT_GRAPH_INTEGRITY_KEY_PATH`.
+
+#### New keyed store
+
+Use a fresh directory.  This example keeps the older quick start's `$HOME/.local/share/agent-graph` store separate:
+
 ```bash
-mkdir -p ~/.local/share/agent-graph
-openssl rand -hex 32 > ~/.local/share/agent-graph/integrity.key
-agent-graph-mcpd --data-dir ~/.local/share/agent-graph --socket /tmp/agent-graph.sock &
+AGENT_GRAPH_DATA_DIR="$HOME/.local/share/agent-graph-keyed"
+(
+  set -e
+  umask 077
+  mkdir -p "$HOME/.local/share"
+  # Refuse an existing path so initialization cannot replace a store or key.
+  mkdir -m 700 "$AGENT_GRAPH_DATA_DIR"
+  export AGENT_GRAPH_INTEGRITY_KEY_PATH="$AGENT_GRAPH_DATA_DIR/integrity.key"
+  openssl rand -hex 32 > "$AGENT_GRAPH_INTEGRITY_KEY_PATH"
+  exec agent-graph-mcpd --data-dir "$AGENT_GRAPH_DATA_DIR" --socket /tmp/agent-graph.sock
+) &
 ```
+
+If that directory already exists, choose another unused directory or use the matching restart instructions below.  Stop any daemon using `/tmp/agent-graph.sock` before starting another, or choose a distinct socket and use it in the proxy configuration too.
+
+#### Existing stores and the older quick start
+
+The instructions before [PR #5](https://github.com/RecursiveIntell/ri-agent-graph/pull/5) created `integrity.key` without exporting its path.  If the daemon started with no inherited `AGENT_GRAPH_INTEGRITY_KEY_PATH`, it recorded that store as `keyless`, even though the file exists.  Only for that keyless store, restart without changing its mode:
+
+```bash
+env -u AGENT_GRAPH_INTEGRITY_KEY_PATH agent-graph-mcpd \
+  --data-dir "$HOME/.local/share/agent-graph" --socket /tmp/agent-graph.sock &
+```
+
+Keyless operation still rejects integrity-sensitive operations with `INTEGRITY_KEY_REQUIRED`.  The current daemon CLI has no supported in-place keyless-to-keyed conversion.  To begin keyed operation, use a fresh separate data directory as above and retain the old store; this does not migrate its graphs, runs, checkpoints, or receipts.  Do not delete the database or edit its startup-mode record to bypass the rejection.
+
+The PR #5 quick start exported `AGENT_GRAPH_INTEGRITY_KEY_PATH` before starting the daemon.  A store successfully initialized that way in `$HOME/.local/share/agent-graph` is keyed.  Restart it with its original key and data directory; do not use the keyless command above:
+
+```bash
+AGENT_GRAPH_INTEGRITY_KEY_PATH="$HOME/.local/share/agent-graph/integrity.key" \
+  agent-graph-mcpd --data-dir "$HOME/.local/share/agent-graph" \
+  --socket /tmp/agent-graph.sock &
+```
+
+For a store already initialized keyed, restart with the same data directory and original key.  For the new keyed example above:
+
+```bash
+AGENT_GRAPH_INTEGRITY_KEY_PATH="$HOME/.local/share/agent-graph-keyed/integrity.key" \
+  agent-graph-mcpd --data-dir "$HOME/.local/share/agent-graph-keyed" \
+  --socket /tmp/agent-graph.sock &
+```
+
+Preserve the original key on every restart.  If it is missing, recover it rather than generating a replacement for the existing keyed store.  See [startup mode enforcement](src/daemon.rs) and the [restart regression tests](tests/daemon_recovery.rs).
+
+This workspace daemon accepts `--data-dir` and `--socket`.  Its current source fixes the provider URL to `http://127.0.0.1:11434` and the default model to `glm-5.2:cloud`; these are not proxy flags and the model may use a remote Ollama service.  Graph node specs can override that default with their `model` field. The deprecated direct path accepts `--direct --base-url ... --model ...` to change its provider URL and default model.  The independently maintained [agent-graph-mcp repository](https://github.com/RecursiveIntell/agent-graph-mcp) has a different CLI and source version; inspect the selected binary rather than copying its flags into this workspace daemon.
 
 ### 3. Configure Hermes
 
@@ -58,12 +105,8 @@ mcp_servers:
   agent_graph:
     command: ~/.cargo/bin/agent-graph-mcp
     args:
-      - --base-url
-      - http://127.0.0.1:11434
-      - --model
-      - glm-5.2:cloud
-      - --data-dir
-      - ~/.agent-graph
+      - --socket
+      - /tmp/agent-graph.sock
     enabled: true
 ```
 
@@ -71,7 +114,7 @@ mcp_servers:
 
 ```bash
 # Smoke test — verify no tracing pollution on stdout
-printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}\n{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}\n{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}\n' | timeout 5 agent-graph-mcp --base-url http://127.0.0.1:11434 --model glm-5.2:cloud 2>/dev/null | grep -c '"jsonrpc"'
+printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}\n{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}\n{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}\n' | timeout 5 agent-graph-mcp --socket /tmp/agent-graph.sock 2>/dev/null | grep -c '"jsonrpc"'
 # Expected: 2 (initialize + tools/list response)
 ```
 
@@ -115,7 +158,7 @@ printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion
 | `graph_source_witness_capture` | Persist caller-supplied source content (HMAC-authenticated) |
 | `graph_source_witness_get` | Read witness with authentication tag verification |
 
-### Templates & policy (4 tools)
+### Templates & policy (5 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -125,7 +168,7 @@ printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion
 | `graph_template_outcomes` | Recorded outcome history |
 | `graph_policy_check` | Preflight validation against model/tool/data/budget policy |
 
-### Status & receipts (3 tools)
+### Status & receipts (2 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -241,7 +284,7 @@ agent-graph-mcpd --data-dir PATH --socket PATH
 
 ## Audit closure
 
-All 28 hostile-audit findings (AG-001 through AG-028) are closed.
+The [closure ledger](docs/remediation/hostile-audit-closure-ledger.md) records the disposition of 28 historical findings (AG-001 through AG-028), with named tests and residual scope.  The gate summary below is historical audit evidence, not a fresh pass for the current commit.  Re-run the verification commands against the exact source and environment before making a current closure or release claim.
 
 | Gate | Result |
 |------|--------|
@@ -275,7 +318,7 @@ cargo publish -p agent-graph-mcp --dry-run
 
 ## Claim boundaries
 
-- This MCP server **exposes the agent-graph runtime** over the MCP protocol. It does not include LLM provider clients, prompt templating, or response parsing — those belong in `llm-pipeline` or the application layer
+- This MCP server **exposes the agent-graph runtime** over MCP and wires its bundled LLM nodes through `llm-pipeline::LlmCall`.  Provider payload execution belongs to the `llm-pipeline` dependency; the core graph engine remains separate from provider clients
 - **Receipts prove structural execution** — they carry cryptographic digests of the local execution trace only. They do not prove external model calls occurred or what any provider's internal state was
 - **Resume is deterministic local resume** — it does not support resuming across LLM calls, network I/O, or external tool invocations
 - **Checkpoint integrity** requires `AGENT_GRAPH_INTEGRITY_KEY_PATH` to be configured. Without it, checkpoint/resume, durable approval, terminal receipt, and source-witness operations fail closed
@@ -285,9 +328,9 @@ cargo publish -p agent-graph-mcp --dry-run
 
 | Crate | Description | Version |
 |-------|-------------|---------|
-| [ri-agent-graph](https://crates.io/crates/ri-agent-graph) | Core graph execution engine | v0.2.1 |
-| [agent-graph-mcp](https://crates.io/crates/agent-graph-mcp) | MCP server (this crate) | v0.2.2 |
-| [llm-pipeline](https://crates.io/crates/llm-pipeline) | Reusable LLM node payloads (Ollama, prompt templating, parsing) | v0.2.0 |
+| [ri-agent-graph](https://crates.io/crates/ri-agent-graph) | Core graph execution engine | local 0.2.4 |
+| [agent-graph-mcp](https://crates.io/crates/agent-graph-mcp) | MCP server (this crate) | local 0.2.3 |
+| [llm-pipeline](https://crates.io/crates/llm-pipeline) | Reusable LLM node payloads (Ollama, prompt templating, parsing) | dependency 0.2 |
 | [stack-ids](https://crates.io/crates/stack-ids) | Shared identity, scope, and trace primitives | v0.1.3 |
 
 ## Roadmap
@@ -306,3 +349,4 @@ MIT — see [LICENSE-MIT](LICENSE-MIT) for details.
 ---
 
 Built by [RecursiveIntell](https://github.com/RecursiveIntell) — an applied R&D studio building local-first AI infrastructure.
+
