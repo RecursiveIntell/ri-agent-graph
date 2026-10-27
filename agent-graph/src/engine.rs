@@ -7,6 +7,7 @@ use crate::config::GraphConfig;
 use crate::edge::EdgeType;
 use crate::error::{AgentGraphError, CheckpointStoreOperation, Result};
 use crate::event_sink::{EventSink, GraphEvent, NodeOutcomeKind};
+use crate::executor::NodeExecutionContext;
 use crate::graph::{AgentGraph, END, START};
 use crate::interrupt::{ExecutionResult, InterruptCheckpoint};
 use crate::retry::RetryPolicy;
@@ -664,12 +665,16 @@ impl<'a> GraphExecutor<'a> {
             let state = self.state.clone();
             let config = self.config.clone();
             execute_node_attempt_family(
-                move || {
+                move |context| {
                     let executor = executor.clone();
                     let node = node.clone();
                     let state = state.clone();
                     let config = config.clone();
-                    async move { executor.execute_node(node, state, config).await }
+                    async move {
+                        executor
+                            .execute_node_with_context(node, state, config, context)
+                            .await
+                    }
                 },
                 retry,
                 self.cancel_flag.clone(),
@@ -688,7 +693,7 @@ impl<'a> GraphExecutor<'a> {
             let state = self.state.clone();
             let config = self.config.clone();
             execute_node_attempt_family(
-                move || {
+                move |_context| {
                     let node = node.clone();
                     let state = state.clone();
                     let config = config.clone();
@@ -867,12 +872,15 @@ impl<'a> GraphExecutor<'a> {
                 let before = forked_state.export().await;
                 let execution_state = forked_state.clone();
                 let outcome = execute_node_attempt_family(
-                    move || {
+                    move |context| {
                         let exec = exec.clone();
                         let node = node.clone();
                         let forked_state = execution_state.clone();
                         let config = config.clone();
-                        async move { exec.execute_node(node, forked_state, config).await }
+                        async move {
+                            exec.execute_node_with_context(node, forked_state, config, context)
+                                .await
+                        }
                     },
                     retry_policy,
                     cancel_flag.clone(),
@@ -947,7 +955,7 @@ impl<'a> GraphExecutor<'a> {
                 let before = forked_state.export().await;
                 let execution_state = forked_state.clone();
                 let outcome = execute_node_attempt_family(
-                    move || {
+                    move |_context| {
                         let node = node.clone();
                         let forked_state = execution_state.clone();
                         let config = config.clone();
@@ -1074,7 +1082,7 @@ async fn execute_node_attempt_family<ExecOnce, ExecFut>(
     canonical_attempt_id: stack_ids::AttemptId,
 ) -> std::result::Result<AttemptFamilySuccess, AttemptFamilyFailure>
 where
-    ExecOnce: FnMut() -> ExecFut,
+    ExecOnce: FnMut(NodeExecutionContext) -> ExecFut,
     ExecFut: Future<Output = Result<NodeOutput>>,
 {
     let max_attempts = retry
@@ -1122,7 +1130,14 @@ where
             None
         };
 
-        match exec_once().await {
+        let context = NodeExecutionContext::new(
+            run_id.clone(),
+            node_id.clone(),
+            canonical_attempt_id.clone(),
+            trial_id.clone(),
+            attempt_index,
+        );
+        match exec_once(context).await {
             Ok(output) => {
                 if let NodeOutput::Command(ref cmd) = output {
                     if let Some(ref updates) = cmd.update {
