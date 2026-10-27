@@ -60,6 +60,7 @@ impl DaemonLock {
         let path = data_dir.join("daemon.lock");
         let file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .mode(0o600)
@@ -76,7 +77,7 @@ impl DaemonLock {
 }
 impl Drop for DaemonLock {
     fn drop(&mut self) {
-        let _ = self.file.unlock();
+        let _ = fs2::FileExt::unlock(&self.file);
         let _ = self.file.sync_all();
     }
 }
@@ -207,4 +208,47 @@ pub fn socket_path(runtime_dir: &Path, instance: &str) -> PathBuf {
         .join("agent-graph")
         .join(instance)
         .join("daemon.sock")
+}
+
+#[cfg(test)]
+mod l1_boundary_tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+
+    #[test]
+    fn daemon_lock_preserves_preseeded_content_and_inode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.lock");
+        let sentinel = b"existing daemon owner metadata\n";
+        fs::write(&path, sentinel).unwrap();
+        let before = fs::metadata(&path).unwrap();
+        let first = DaemonLock::acquire(dir.path()).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), sentinel);
+        assert_eq!(fs::metadata(&path).unwrap().ino(), before.ino());
+        let error = DaemonLock::acquire(dir.path()).unwrap_err();
+        assert_eq!(error.code(), "DATA_DIR_ALREADY_OWNED");
+        assert_eq!(fs::read(&path).unwrap(), sentinel);
+        let after = fs::metadata(&path).unwrap();
+        assert_eq!((after.dev(), after.ino()), (before.dev(), before.ino()));
+        drop(first);
+        let _reacquired = DaemonLock::acquire(dir.path()).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), sentinel);
+        assert_eq!(fs::metadata(&path).unwrap().ino(), before.ino());
+    }
+
+    #[test]
+    fn daemon_drop_explicitly_unlocks_with_cloned_descriptor_alive() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = DaemonLock::acquire(dir.path()).unwrap();
+        let retained_descriptor = first.file.try_clone().unwrap();
+        assert!(matches!(
+            DaemonLock::acquire(dir.path()),
+            Err(DaemonError::AlreadyOwned)
+        ));
+        drop(first);
+        let _reacquired = DaemonLock::acquire(dir.path())
+            .expect("Drop explicitly releases the shared file description lock");
+        assert!(retained_descriptor.metadata().is_ok());
+        drop(retained_descriptor);
+    }
 }
